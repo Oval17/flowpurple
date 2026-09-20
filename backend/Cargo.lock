@@ -2624,15 +2624,6 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
-name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
@@ -10610,7 +10601,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7106215ff41a5677b104906a13e1a440b880f4b6362b5dc4f3978c267fad2b80"
 dependencies = [
- "convert_case 0.10.0",
+ "convert_case",
  "fnv",
  "ident_case",
  "indexmap 2.14.2",
@@ -15931,7 +15922,7 @@ dependencies = [
 name = "windmill-parser"
 version = "1.815.0"
 dependencies = [
- "convert_case 0.6.0",
+ "convert_case",
  "serde",
  "serde_json",
 ]
@@ -16094,7 +16085,7 @@ name = "windmill-parser-rust"
 version = "1.815.0"
 dependencies = [
  "anyhow",
- "convert_case 0.6.0",
+ "convert_case",
  "itertools 0.14.0",
  "lazy_static",
  "pulldown-cmark",
@@ -16722,7 +16713,7 @@ dependencies = [
  "bytes",
  "chrono",
  "const_format",
- "convert_case 0.6.0",
+ "convert_case",
  "derive_more 1.0.0",
  "dotenv",
  "eventsource-stream",
