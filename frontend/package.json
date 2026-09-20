@@ -154,7 +154,7 @@
 		"svelte-carousel": "^1.0.25",
 		"svelte-exmarkdown": "^5.0.0",
 		"svelte-infinite-loading": "^1.4.0",
-		"tailwind-merge": "^1.13.2",
+		"tailwind-merge": "^3.7.0",
 		"unist-util-visit": "^5.0.0",
 		"vscode": "npm:@codingame/monaco-vscode-extension-api@=25.0.0",
 		"vscode-languageclient": "~9.0.1",
