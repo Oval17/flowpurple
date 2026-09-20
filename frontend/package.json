@@ -42,7 +42,7 @@
 		"@zerodevx/svelte-toast": "^0.9.6",
 		"autoprefixer": "^10.4.13",
 		"cssnano": "^6.0.1",
-		"d3-dag": "^0.11.5",
+		"d3-dag": "^1.2.2",
 		"dts-bundle-generator": "^9.5.1",
 		"eslint": "^8.47.0",
 		"eslint-config-prettier": "^8.6.0",
