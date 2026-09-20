@@ -1249,7 +1249,7 @@ dependencies = [
  "bytes",
  "form_urlencoded",
  "hex",
- "hmac",
+ "hmac 0.12.1",
  "http 0.2.12",
  "http 1.5.0",
  "percent-encoding",
@@ -5670,7 +5670,7 @@ dependencies = [
  "google-cloud-metadata",
  "google-cloud-token",
  "hex",
- "hmac",
+ "hmac 0.12.1",
  "home",
  "jsonwebtoken 9.3.1",
  "path-clean",
@@ -6039,7 +6039,7 @@ version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -6049,6 +6049,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -8551,7 +8560,7 @@ dependencies = [
  "chrono",
  "dyn-clone",
  "ed25519-dalek",
- "hmac",
+ "hmac 0.12.1",
  "http 1.5.0",
  "itertools 0.10.5",
  "log",
@@ -8908,7 +8917,7 @@ dependencies = [
  "der",
  "des 0.8.1",
  "hex",
- "hmac",
+ "hmac 0.12.1",
  "pkcs12",
  "pkcs5",
  "rand 0.9.0",
@@ -9072,7 +9081,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
- "hmac",
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -9501,7 +9510,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "fallible-iterator",
- "hmac",
+ "hmac 0.12.1",
  "md-5 0.10.6",
  "memchr",
  "rand 0.9.0",
@@ -10473,7 +10482,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
  "subtle",
 ]
 
@@ -12079,7 +12088,7 @@ dependencies = [
  "generic-array",
  "hex",
  "hkdf",
- "hmac",
+ "hmac 0.12.1",
  "itoa",
  "log",
  "md-5 0.10.6",
@@ -12119,7 +12128,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hkdf",
- "hmac",
+ "hmac 0.12.1",
  "home",
  "itoa",
  "log",
@@ -14809,7 +14818,7 @@ dependencies = [
  "gethostname",
  "git-version",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "jsonwebtoken 8.3.0",
  "lazy_static",
  "once_cell",
@@ -14956,7 +14965,7 @@ dependencies = [
  "futures",
  "git-version",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "http 1.5.0",
  "hyper 1.11.1",
  "indexmap 2.14.2",
@@ -15291,7 +15300,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "rand 0.9.0",
  "rdkafka",
  "reqwest 0.13.5",
@@ -15631,7 +15640,7 @@ dependencies = [
  "git-version",
  "globset",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "hyper 1.11.1",
  "indexmap 2.14.2",
  "itertools 0.14.0",
@@ -15828,7 +15837,7 @@ dependencies = [
  "backon",
  "base64 0.22.1",
  "chrono",
- "hmac",
+ "hmac 0.13.0",
  "http 1.5.0",
  "itertools 0.14.0",
  "lazy_static",
@@ -15860,7 +15869,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "itertools 0.14.0",
  "lazy_static",
  "reqwest 0.12.28",
@@ -16210,7 +16219,7 @@ dependencies = [
  "futures",
  "futures-core",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "itertools 0.14.0",
  "lazy_static",
  "once_cell",
@@ -16503,7 +16512,7 @@ dependencies = [
  "constant_time_eq 0.3.1",
  "futures",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "http 1.5.0",
  "hyper 1.11.1",
  "itertools 0.14.0",
@@ -16733,7 +16742,7 @@ dependencies = [
  "gcp_auth",
  "git-version",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "hudsucker",
  "hyper-http-proxy",
  "hyper-rustls 0.27.9",
