@@ -92,7 +92,7 @@
 		"@aws-crypto/sha256-js": "^4.0.0",
 		"@codingame/monaco-vscode-editor-api": "=25.0.0",
 		"@codingame/monaco-vscode-languages-service-override": "=25.0.0",
-		"@codingame/monaco-vscode-standalone-css-language-features": "=25.0.0",
+		"@codingame/monaco-vscode-standalone-css-language-features": "=36.2.7",
 		"@codingame/monaco-vscode-standalone-html-language-features": "=25.0.0",
 		"@codingame/monaco-vscode-standalone-json-language-features": "=25.0.0",
 		"@codingame/monaco-vscode-standalone-languages": "=25.0.0",
