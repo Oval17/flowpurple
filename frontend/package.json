@@ -136,7 +136,7 @@
 		"minimatch": "^10.2.3",
 		"modern-screenshot": "^4.7.0",
 		"monaco-editor": "npm:@codingame/monaco-vscode-editor-api@=25.0.0",
-		"monaco-languageclient": "10.6.0",
+		"monaco-languageclient": "10.7.0",
 		"monaco-vim": "^0.4.1",
 		"ol": "^7.4.0",
 		"openai": "^6.9.1",
