@@ -748,7 +748,7 @@ rumqttc = { version = "0.24.0", features = ["use-native-tls"]}
 lapin = "2.5"
 tokio-executor-trait = "2.1"
 tokio-reactor-trait = "1.1"
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.27"
 hudsucker = { version = "0.22", features = ["rcgen-ca", "native-tls-client"] }
 hyper-http-proxy = { version = "1", default-features = false, features = ["rustls-tls-native-roots"] }
