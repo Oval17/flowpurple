@@ -644,7 +644,7 @@ fs4 = "0.13"
 tinyvector = { git = "https://github.com/windmill-labs/tinyvector", rev = "20823b94c20f2b9093f318badd24026cf54dcc85" }
 hf-hub = "0.4.3"
 tokenizers = "0.14.1"
-candle-core = "0.9.1"
+candle-core = "0.11.0"
 candle-transformers = "0.9.1"
 candle-nn = "0.9.1"
 tiberius = { version = "0.12.3", default-features = false, features = ["rustls", "tds73", "chrono", "sql-browser-tokio"]}
