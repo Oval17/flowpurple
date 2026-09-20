@@ -4540,16 +4540,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirs-next"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b98cf8ebf19c3d1b223e151f99a4f9f0690dca41414773390fc824184ac833e1"
-dependencies = [
- "cfg-if",
- "dirs-sys-next",
-]
-
-[[package]]
 name = "dirs-sys"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4582,17 +4572,6 @@ dependencies = [
  "option-ext",
  "redox_users 0.5.3",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "dirs-sys-next"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ebda144c4fe02d1f7ea1a7d9641b6fc6b580adcfa024ae48797ecdeb6825b4d"
-dependencies = [
- "libc",
- "redox_users 0.4.6",
- "winapi",
 ]
 
 [[package]]
@@ -5353,27 +5332,29 @@ dependencies = [
 
 [[package]]
 name = "gcp_auth"
-version = "0.9.0"
+version = "0.12.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d3b20d3058763d26d88e6e7a49998841e5296735b00dbfb064ff7cb142933dd"
+checksum = "26d27dbcc645b60b8e7f6e2868a9d7102ece97d1bb49c1288b5321fcc67f7260"
 dependencies = [
  "async-trait",
- "base64 0.21.7",
- "dirs-next",
- "hyper 0.14.32",
- "hyper-rustls 0.24.2",
- "ring 0.16.20",
- "rustls 0.21.12",
- "rustls-pemfile 1.0.4",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "http 1.5.0",
+ "http-body-util",
+ "hyper 1.11.1",
+ "hyper-rustls 0.27.9",
+ "hyper-util",
+ "ring 0.17.14",
+ "rustls 0.23.35",
+ "rustls-pki-types",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
- "time",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-futures",
  "url",
- "which 4.4.2",
 ]
 
 [[package]]
@@ -6291,7 +6272,6 @@ dependencies = [
  "hyper 0.14.32",
  "log",
  "rustls 0.21.12",
- "rustls-native-certs 0.6.3",
  "tokio",
  "tokio-rustls 0.24.1",
 ]
@@ -14404,7 +14384,7 @@ dependencies = [
  "home",
  "miniz_oxide 0.8.9",
  "paste",
- "which 6.0.3",
+ "which",
 ]
 
 [[package]]
@@ -14704,18 +14684,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "which"
-version = "4.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87ba24419a2078cd2b0f2ede2691b6c66d8e47836da3b6db8265ebad47afbfc7"
-dependencies = [
- "either",
- "home",
- "once_cell",
- "rustix 0.38.44",
 ]
 
 [[package]]
