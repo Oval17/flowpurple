@@ -45,7 +45,7 @@
 		"d3-dag": "^0.11.5",
 		"dts-bundle-generator": "^9.5.1",
 		"eslint": "^8.47.0",
-		"eslint-config-prettier": "^8.6.0",
+		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^2.45.1",
 		"fake-indexeddb": "^6.2.5",
 		"jsdom": "^29.1.1",
