@@ -1842,7 +1842,7 @@ dependencies = [
  "arrayvec",
  "cc",
  "cfg-if",
- "constant_time_eq 0.4.2",
+ "constant_time_eq",
  "cpufeatures 0.3.1",
 ]
 
@@ -2609,12 +2609,6 @@ dependencies = [
  "quote",
  "unicode-xid",
 ]
-
-[[package]]
-name = "constant_time_eq"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "constant_time_eq"
@@ -14803,7 +14797,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
- "constant_time_eq 0.3.1",
+ "constant_time_eq",
  "dotenv",
  "futures",
  "gethostname",
@@ -16414,7 +16408,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "constant_time_eq 0.3.1",
+ "constant_time_eq",
  "hex",
  "http 1.5.0",
  "itertools 0.14.0",
@@ -16500,7 +16494,7 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
- "constant_time_eq 0.3.1",
+ "constant_time_eq",
  "futures",
  "hex",
  "hmac",
