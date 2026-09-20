@@ -668,7 +668,7 @@ process-wrap = { version = "8.2.1", features = ["tokio1"] }
 
 systemstat = "0.2.4"
 
-datafusion = "47.0.0"
+datafusion = "49.0.2"
 # The row API only: a dbt engine's parquet index is six string columns, so this
 # needs no arrow and no writer. `parquet` is already in the tree with `arrow` for
 # every shipped edition (`oss_core`), and cargo unifies the features there; this
