@@ -230,7 +230,7 @@ jobs:
           fi
           echo "Verified: Package requires authentication for @windmill-test/private-pkg"
       - name: Cache DuckDB FFI module build
-        uses: actions/cache@v3
+        uses: actions/cache@v6
         with:
           path: ./backend/windmill-duckdb-ffi-internal/target
           key: ${{ runner.os }}-duckdb-ffi-${{ hashFiles('./backend/windmill-duckdb-ffi-internal/src/**/*.rs', './backend/windmill-duckdb-ffi-internal/Cargo.toml', './backend/windmill-duckdb-ffi-internal/Cargo.lock') }}
