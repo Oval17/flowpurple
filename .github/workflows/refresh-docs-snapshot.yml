@@ -37,7 +37,7 @@ jobs:
           pages=$(gzip -dc llms-full.txt.gz | grep -c '^Source:' || true)
           echo "pages in snapshot: $pages"
           test "${pages:-0}" -ge 200
-      - uses: peter-evans/create-pull-request@v6
+      - uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ steps.app.outputs.token }}
           branch: chore/refresh-docs-snapshot
