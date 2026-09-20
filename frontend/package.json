@@ -137,7 +137,7 @@
 		"modern-screenshot": "^4.7.0",
 		"monaco-editor": "npm:@codingame/monaco-vscode-editor-api@=25.0.0",
 		"monaco-languageclient": "10.6.0",
-		"monaco-vim": "^0.4.1",
+		"monaco-vim": "^0.4.4",
 		"ol": "^7.4.0",
 		"openai": "^6.9.1",
 		"openapi-types": "^12.1.3",
