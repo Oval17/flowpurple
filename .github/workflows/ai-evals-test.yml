@@ -172,7 +172,7 @@ jobs:
           [ "$fail" = 0 ] || { echo "ai_evals global smoke failed"; exit 1; }
 
       - name: Archive logs and results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ai-evals-global-logs
