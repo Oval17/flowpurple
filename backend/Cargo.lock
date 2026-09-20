@@ -8439,7 +8439,7 @@ dependencies = [
  "md-5 0.10.6",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.37.5",
  "rand 0.9.0",
  "reqwest 0.12.28",
  "ring 0.17.14",
@@ -9838,6 +9838,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quick_cache"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11113,7 +11123,7 @@ dependencies = [
  "openssl-probe 0.1.6",
  "openssl-sys",
  "pkg-config",
- "quick-xml",
+ "quick-xml 0.37.5",
  "rand 0.9.0",
  "serde",
  "thiserror 2.0.20",
@@ -14974,7 +14984,7 @@ dependencies = [
  "pin-project",
  "postgres-native-tls 0.5.3",
  "prometheus",
- "quick-xml",
+ "quick-xml 0.42.0",
  "quick_cache",
  "rand 0.9.0",
  "regex",
