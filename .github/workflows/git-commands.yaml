@@ -43,7 +43,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app
         with:
           app-id: ${{ vars.INTERNAL_APP_ID }}
@@ -242,7 +242,7 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app
         with:
           app-id: ${{ vars.INTERNAL_APP_ID }}
@@ -331,7 +331,7 @@ jobs:
       pull-requests: read
       issues: read
     steps:
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app
         with:
           app-id: ${{ vars.INTERNAL_APP_ID }}

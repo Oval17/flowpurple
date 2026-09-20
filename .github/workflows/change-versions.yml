@@ -9,7 +9,7 @@ jobs:
     runs-on: ubicloud
     container: node:18
     steps:
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app
         with:
           app-id: ${{ vars.INTERNAL_APP_ID }}
