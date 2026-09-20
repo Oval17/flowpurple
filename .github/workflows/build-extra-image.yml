@@ -46,7 +46,7 @@ jobs:
             type=sha,enable=true,priority=100,prefix=,suffix=,format=short
 
       - name: Login to registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
