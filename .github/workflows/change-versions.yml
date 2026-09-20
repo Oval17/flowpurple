@@ -27,7 +27,7 @@ jobs:
         run: |
           cd backend
           cargo generate-lockfile
-      - uses: stefanzweifel/git-auto-commit-action@v5
+      - uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_user_name: windmill-internal-app[bot]
           commit_user_email: windmill-internal-app[bot]@users.noreply.github.com
