@@ -5020,6 +5020,9 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+dependencies = [
+ "getrandom 0.4.3",
+]
 
 [[package]]
 name = "ff"
@@ -5113,7 +5116,18 @@ checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
 dependencies = [
  "futures-core",
  "futures-sink",
- "nanorand",
+ "spin 0.9.9",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "fastrand 2.5.0",
+ "futures-core",
+ "futures-sink",
  "spin 0.9.9",
 ]
 
@@ -7159,7 +7173,7 @@ dependencies = [
  "async-reactor-trait",
  "async-trait",
  "executor-trait",
- "flume",
+ "flume 0.11.1",
  "futures-core",
  "futures-io",
  "parking_lot",
@@ -7971,15 +7985,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "uuid",
-]
-
-[[package]]
-name = "nanorand"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a51313c5820b0b02bd422f4b44776fbf47961755c74ce64afc73bfad10226c3"
-dependencies = [
- "getrandom 0.2.17",
 ]
 
 [[package]]
@@ -9333,7 +9338,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1ea6e230dd3a64d61bcb8b79e597d3ab6b4c94ec7a234ce687dd718b4f2e657"
 dependencies = [
  "doc-comment",
- "flume",
+ "flume 0.11.1",
  "parking_lot",
  "tracing",
 ]
@@ -10657,7 +10662,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1568e15fab2d546f940ed3a21f48bbbd1c494c90c99c4481339364a497f94a9"
 dependencies = [
  "bytes",
- "flume",
+ "flume 0.11.1",
  "futures-util",
  "log",
  "native-tls",
@@ -12147,7 +12152,7 @@ source = "git+https://github.com/windmill-labs/sqlx?rev=6bdaee94fa62a01561125646
 dependencies = [
  "atoi",
  "chrono",
- "flume",
+ "flume 0.11.1",
  "futures-channel",
  "futures-core",
  "futures-executor",
@@ -15747,7 +15752,7 @@ dependencies = [
  "chrono",
  "const_format",
  "datafusion",
- "flume",
+ "flume 0.12.0",
  "futures",
  "lazy_static",
  "object_store",
@@ -16727,7 +16732,7 @@ dependencies = [
  "dotenv",
  "eventsource-stream",
  "flate2",
- "flume",
+ "flume 0.12.0",
  "fs4",
  "futures",
  "gcp_auth",
