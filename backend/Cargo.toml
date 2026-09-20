@@ -638,7 +638,7 @@ samael = { git="https://github.com/njaremko/samael", rev="f879f1942ec1b34b6d3027
 gcp_auth = "0.9.0"
 rust_decimal = { version = "^1", features = ["db-postgres", "serde-float"]}
 jsonwebtoken = "8.3.0"
-pem = "3.0.1"
+pem = "4.0.0"
 nix = { version = "0.27.1", features = ["process", "signal"] }
 fs4 = "0.13"
 tinyvector = { git = "https://github.com/windmill-labs/tinyvector", rev = "20823b94c20f2b9093f318badd24026cf54dcc85" }
