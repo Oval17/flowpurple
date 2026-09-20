@@ -75,7 +75,7 @@ jobs:
 
       - name: Docker meta
         id: meta-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -136,7 +136,7 @@ jobs:
 
       - name: Docker meta
         id: meta-ee-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ee
@@ -525,7 +525,7 @@ jobs:
 
       - name: Docker meta
         id: meta-ee-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ee-cuda
@@ -578,7 +578,7 @@ jobs:
 
       - name: Docker meta
         id: meta-ee-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-slim
@@ -631,7 +631,7 @@ jobs:
 
       - name: Docker meta
         id: meta-ee-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ee-slim
@@ -685,7 +685,7 @@ jobs:
 
       - name: Docker meta
         id: meta-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-full
@@ -737,7 +737,7 @@ jobs:
 
       - name: Docker meta
         id: meta-ee-public
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-ee-full
