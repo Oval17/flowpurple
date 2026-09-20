@@ -225,7 +225,7 @@ jobs:
           mv "${{ steps.extract-ee.outputs.destination }}/windmill" "${{ steps.extract-ee.outputs.destination }}/windmill-ee-${ARCH}"
 
       - name: Attach binary to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.extract.outputs.destination }}/*
@@ -282,7 +282,7 @@ jobs:
           mv ./debuginfo/windmill.debug ./debuginfo/windmill-ee-${{ matrix.arch }}.debug
 
       - name: Attach debug file to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ./debuginfo/windmill-ee-${{ matrix.arch }}.debug
 
@@ -324,7 +324,7 @@ jobs:
   #         mv "${{ steps.extract-ee.outputs.destination }}/windmill" "${{ steps.extract-ee.outputs.destination }}/windmill-ee-${ARCH}"
 
   #     - name: Attach binary to release
-  #       uses: softprops/action-gh-release@v2
+  #       uses: softprops/action-gh-release@v3
   #       with:
   #         files: |
   #           ${{ steps.extract.outputs.destination }}/*
