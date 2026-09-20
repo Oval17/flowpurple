@@ -1,0 +1,164 @@
+<script lang="ts">
+	import type { Schema } from '$lib/common'
+	import { type InputTransform } from '$lib/gen'
+	import { allTrue, type DynamicInput as DynamicInputTypes } from '$lib/utils'
+	import { untrack } from 'svelte'
+	import StepInputsGen from './copilot/StepInputsGen.svelte'
+	import type { PickableProperties } from './flows/previousResults'
+	import InputTransformForm from './InputTransformForm.svelte'
+	import InputTransformPickers from './InputTransformPickers.svelte'
+	import { useWorkspaceStorageConfigured } from './inputTransformEnv.svelte'
+	import type ItemPicker from './ItemPicker.svelte'
+	import type VariableEditor from './VariableEditor.svelte'
+	import ResizeTransitionWrapper from './common/ResizeTransitionWrapper.svelte'
+	import { useOperatingWorkspace } from '$lib/components/operatingWorkspace.svelte'
+
+	const operatingWorkspace = useOperatingWorkspace()
+
+	interface Props {
+		schema: Schema | { properties?: Record<string, any> }
+		args?: Record<string, InputTransform | any>
+		isValid?: boolean
+		extraLib?: string
+		previousModuleId?: string | undefined
+		filter?: string[] | undefined
+		noDynamicToggle?: boolean
+		/** Passed to every field. See `InputTransformForm` for what each one drops. */
+		noConnect?: boolean
+		noJavascript?: boolean
+		pickableProperties?: PickableProperties | undefined
+		enableAi?: boolean
+		class?: string
+		helperScript?: DynamicInputTypes.HelperScript
+		isAgentTool?: boolean
+		allowedAiTransforms?: string[] | undefined
+		chatInputEnabled?: boolean
+		workspace?: string | undefined
+	}
+
+	let {
+		schema = $bindable(),
+		args = $bindable({}),
+		isValid = $bindable(true),
+		extraLib = $bindable('missing extraLib'),
+		previousModuleId = undefined,
+		filter = undefined,
+		noDynamicToggle = false,
+		noConnect = false,
+		noJavascript = false,
+		pickableProperties = undefined,
+		enableAi = false,
+		class: clazz = '',
+		helperScript = undefined,
+		isAgentTool = false,
+		allowedAiTransforms = isAgentTool ? undefined : [],
+		chatInputEnabled = false,
+		workspace
+	}: Props = $props()
+
+	let ws = $derived(workspace ?? $operatingWorkspace)
+
+	let inputCheck: { [id: string]: boolean } = $state({})
+
+	$effect(() => {
+		isValid = allTrue(inputCheck) ?? false
+	})
+
+	$effect(() => {
+		if (args == undefined || typeof args !== 'object') {
+			args = {}
+		}
+	})
+
+	export function setArgs(nargs: Record<string, InputTransform | any>) {
+		args = nargs
+	}
+
+	function removeExtraKey() {
+		const nargs = {}
+		Object.keys(args ?? {}).forEach((key) => {
+			if (keys.includes(key)) {
+				nargs[key] = args[key]
+			}
+		})
+		args = nargs
+	}
+
+	let pickForField: string | undefined = $state()
+	let itemPicker: ItemPicker | undefined = $state(undefined)
+	let variableEditor: VariableEditor | undefined = $state(undefined)
+
+	const s3Storage = useWorkspaceStorageConfigured(() => ws)
+
+	let keys: string[] = $state([])
+	$effect(() => {
+		let lkeys = Object.keys(schema?.properties ?? {})
+		if (schema?.properties && JSON.stringify(lkeys) != JSON.stringify(keys)) {
+			keys = lkeys
+			untrack(() => removeExtraKey())
+		}
+	})
+</script>
+
+<div class="w-full mb-6 {clazz}">
+	<!-- Not offered on a tool: the fields it fills are exactly the ones left empty for the agent
+	     to fill at run time, and filling one rewrites it into an expression, which takes it out of
+	     the schema the model is given. -->
+	{#if enableAi && !isAgentTool}
+		<div class="pt-2">
+			<StepInputsGen
+				{pickableProperties}
+				argNames={keys
+					? keys.filter(
+							(argName) =>
+								Object.keys(schema.properties ?? {}).includes(argName) &&
+								Object.keys(args ?? {}).includes(argName) &&
+								((args[argName].type === 'static' && !args[argName].value) ||
+									(args[argName].type === 'javascript' && !args[argName].expr))
+						)
+					: []}
+				{schema}
+			/>
+		</div>
+	{/if}
+	{#if keys.length > 0}
+		{#each keys as argName, index (argName)}
+			{#if (!filter || filter.includes(argName)) && Object.keys(schema.properties ?? {}).includes(argName)}
+				<ResizeTransitionWrapper class="mt-6" innerClass="w-full" vertical>
+					<InputTransformForm
+						{previousModuleId}
+						bind:arg={args[argName]}
+						bind:schema
+						bind:argName={keys[index]}
+						argExtra={schema.properties?.[argName] ?? {}}
+						bind:inputCheck={
+							() => inputCheck[argName] ?? false, (value) => (inputCheck[argName] = value)
+						}
+						bind:extraLib
+						{variableEditor}
+						{itemPicker}
+						bind:pickForField
+						{noDynamicToggle}
+						{noConnect}
+						{noJavascript}
+						{pickableProperties}
+						{enableAi}
+						{helperScript}
+						{isAgentTool}
+						{allowedAiTransforms}
+						s3StorageConfigured={s3Storage.current}
+						{chatInputEnabled}
+						{workspace}
+						otherArgs={Object.fromEntries(
+							Object.entries(args ?? {}).filter(([key]) => key !== argName)
+						)}
+					/>
+				</ResizeTransitionWrapper>
+			{/if}
+		{/each}
+	{:else}
+		<div class="text-primary text-xs mt-2">No inputs</div>
+	{/if}
+</div>
+
+<InputTransformPickers {args} {pickForField} {workspace} bind:itemPicker bind:variableEditor />

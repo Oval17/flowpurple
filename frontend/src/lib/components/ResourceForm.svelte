@@ -1,0 +1,324 @@
+<script lang="ts">
+	import ResourceDescriptionField from './ResourceDescriptionField.svelte'
+	import type { Schema } from '$lib/common'
+	import type { Resource, ResourceType } from '$lib/gen'
+	import { onDestroy } from 'svelte'
+	import { setEditorUnparseable } from './pendingEditorFlush'
+	import { emptyString, isOwner, urlize } from '$lib/utils'
+	import { Alert, Skeleton } from './common'
+	import Path from './Path.svelte'
+	import LabelsInput from './LabelsInput.svelte'
+	import { type UserExt } from '$lib/stores'
+	import SchemaForm from './SchemaForm.svelte'
+	import SimpleEditor from './SimpleEditor.svelte'
+	import FilesetEditor from './FilesetEditor.svelte'
+	import Toggle from './Toggle.svelte'
+	import TestConnection from './TestConnection.svelte'
+	import GfmMarkdown from './GfmMarkdown.svelte'
+	import TestTriggerConnection from './triggers/TestTriggerConnection.svelte'
+	import GitHubAppIntegration from './GitHubAppIntegration.svelte'
+	import GitLabIntegration from './GitLabIntegration.svelte'
+	import ResourceGen from './copilot/ResourceGen.svelte'
+	import SyncResourceTypes from './SyncResourceTypes.svelte'
+	import Label from './Label.svelte'
+	import ResourcePathHint from './ResourcePathHint.svelte'
+	import { useOperatingWorkspace } from '$lib/components/operatingWorkspace.svelte'
+
+	const operatingWorkspace = useOperatingWorkspace()
+
+	interface Props {
+		path: string
+		initialPath: string
+		hidePath?: boolean
+		labels: string[] | undefined
+		description: string
+		args: Record<string, any>
+		wsSpecific: boolean
+		isValid: boolean
+		viewJsonSchema: boolean
+		jsonError: string
+		deployTo: string | undefined
+		/** `undefined` while the acting user or the resource is still being resolved: neither a
+		 * grant nor the denial the read-only alert announces. */
+		can_write: boolean | undefined
+		resource_type: string | undefined
+		resourceTypeInfo: ResourceType | undefined
+		resourceSchema: Schema | undefined
+		loadingSchema: boolean
+		resourceToEdit: Resource | undefined
+		onLoadResourceType?: () => void
+		/** Workspace the path is validated against and the connection is tested in;
+		 * defaults to the nav workspace. */
+		workspace?: string | undefined
+		/** The user acting in `workspace`, resolved by the editor above. `undefined` while
+		 * `null` while that lookup is pending or after it failed: every check below then
+		 * refuses, rather than answering with the navigation user's rights in another
+		 * workspace. */
+		actingUser: UserExt | null
+		/** Fired once the GitLab picker has stored the picked project's token, so a
+		 * form that would otherwise file the URL as a secret knows it holds none. */
+		onCredentialStored?: () => void
+	}
+
+	let {
+		path = $bindable(),
+		initialPath,
+		hidePath = false,
+		labels = $bindable(),
+		description = $bindable(),
+		args = $bindable(),
+		wsSpecific = $bindable(),
+		isValid = $bindable(),
+		viewJsonSchema = $bindable(),
+		jsonError = $bindable(),
+		deployTo,
+		can_write,
+		resource_type,
+		resourceTypeInfo,
+		resourceSchema,
+		loadingSchema,
+		resourceToEdit,
+		onLoadResourceType,
+		workspace = undefined,
+		actingUser,
+		onCredentialStored
+	}: Props = $props()
+
+	let ws = $derived(workspace ?? $operatingWorkspace)
+
+	let rawCode: string | undefined = $state(undefined)
+	let textFileContent: string = $state('')
+
+	// This field is a bare SimpleEditor parsed here, so it never passes through JsonEditor —
+	// it has to register itself, or a caller persisting what is on screen would save the
+	// last value that parsed and leave without the text in front of the user.
+	const unparseableKey = {}
+	onDestroy(() => setEditorUnparseable(unparseableKey, false))
+
+	function parseJson() {
+		try {
+			args = JSON.parse(rawCode ?? '')
+			jsonError = ''
+		} catch (e) {
+			jsonError = e.message
+		}
+	}
+
+	function parseTextFileContent() {
+		args = { content: textFileContent }
+	}
+
+	// The raw JSON editor is the active input whenever the "As JSON" toggle is on,
+	// or no schema-based form can be rendered (e.g. the resource type is missing
+	// from the workspace). In both cases rawCode must be seeded from args.
+	let usesRawEditor = $derived(
+		!loadingSchema &&
+			(viewJsonSchema ||
+				(!resourceTypeInfo?.is_fileset && !(resourceSchema && resourceSchema.properties)))
+	)
+
+	$effect(() => {
+		if (rawCode !== undefined) parseJson()
+	})
+
+	// Both halves, and from the current parse rather than from a transition: `rawCode`
+	// outlives the raw editor, so text that does not parse is the user's to fix exactly
+	// while that editor is the active input — which the schema loading and the resource
+	// type flip as well as the toggle, and only the toggle reseeds `rawCode`.
+	$effect(() => {
+		setEditorUnparseable(unparseableKey, usesRawEditor && jsonError !== '')
+	})
+
+	$effect(() => {
+		if (usesRawEditor && rawCode === undefined) {
+			rawCode = JSON.stringify(args, null, 2)
+		}
+	})
+
+	// Seed the JSON editor when the resource type schema is missing
+	// (restores the old ResourceEditor's catch-block behavior)
+	$effect(() => {
+		if (resource_type && !loadingSchema && !resourceSchema && rawCode === undefined) {
+			rawCode = JSON.stringify(args, null, 2)
+		}
+	})
+
+	$effect(() => {
+		if (textFileContent) parseTextFileContent()
+	})
+
+	$effect(() => {
+		if (resourceTypeInfo?.format_extension && !resourceTypeInfo?.is_fileset && !viewJsonSchema) {
+			textFileContent = args?.content ?? ''
+		}
+	})
+</script>
+
+{#if !emptyString(resourceTypeInfo?.description)}
+	<GfmMarkdown md={urlize(resourceTypeInfo?.description ?? '', 'md')} prose="sm" noPadding />
+{/if}
+
+{#if !hidePath}
+	<div>
+		{#if can_write === false}
+			<div class="my-2">
+				<Alert type="warning" title="Only read access">
+					You only have read access to this resource and cannot edit it
+				</Alert>
+			</div>
+		{/if}
+		<Label label="Path">
+			<ResourcePathHint />
+			<Path
+				disabled={initialPath != '' && !isOwner(initialPath, actingUser ?? undefined, ws)}
+				bind:path
+				{initialPath}
+				namePlaceholder="resource"
+				kind="resource"
+				workspaceOverride={workspace}
+				{actingUser}
+			/>
+		</Label>
+	</div>
+{/if}
+<LabelsInput bind:labels class="-mt-4" />
+
+{#if deployTo}
+	<Label
+		label="Workspace specific"
+		tooltip="Prevents this resource from being deployed to prod/staging. When enabled, any variable referenced via $var: inside the resource value is also automatically marked workspace-specific. Disabling this toggle does not un-mark those variables — they may be referenced by other resources."
+	>
+		<Toggle bind:checked={wsSpecific} />
+	</Label>
+{/if}
+
+<ResourceDescriptionField bind:description canWrite={can_write} />
+
+<div class="flex flex-col gap-1">
+	<div class="w-full flex gap-4 flex-row-reverse items-center">
+		<Toggle
+			bind:checked={viewJsonSchema}
+			on:change={(e) => {
+				if (e.detail) {
+					rawCode = JSON.stringify(args, null, 2)
+				} else if (resourceTypeInfo?.format_extension && !resourceTypeInfo?.is_fileset) {
+					textFileContent = args?.content ?? ''
+				}
+			}}
+			options={{
+				right: 'As JSON'
+			}}
+		/>
+		<ResourceGen
+			bind:args
+			resourceType={resource_type}
+			resourceName={path}
+			resourceDescription={description}
+			{resourceSchema}
+		/>
+		{#if resourceToEdit?.resource_type === 'nats' || resourceToEdit?.resource_type === 'kafka'}
+			<TestTriggerConnection kind={resourceToEdit?.resource_type} args={{ connection: args }} />
+		{:else}
+			<TestConnection
+				resourceType={resourceToEdit?.resource_type}
+				{args}
+				workspaceOverride={workspace}
+			/>
+		{/if}
+		{#if resource_type === 'git_repository' && ws && (actingUser?.is_admin || actingUser?.is_super_admin)}
+			<GitHubAppIntegration
+				resourceType={resource_type}
+				{args}
+				{description}
+				onArgsUpdate={(newArgs) => {
+					args = newArgs
+					// The raw editor is also what a workspace missing the resource type
+					// gets, and it holds its own copy of the value: without this the
+					// picker fills in a URL nothing on screen ever shows.
+					if (viewJsonSchema || !resourceSchema) {
+						rawCode = JSON.stringify(args, null, 2)
+					}
+				}}
+				onDescriptionUpdate={(newDescription) => (description = newDescription)}
+			/>
+			<GitLabIntegration
+				resourceType={resource_type}
+				{args}
+				workspace={ws}
+				{onCredentialStored}
+				onArgsUpdate={(newArgs) => {
+					args = newArgs
+					// The raw editor is also what a workspace missing the resource type
+					// gets, and it holds its own copy of the value: without this the
+					// picker fills in a URL nothing on screen ever shows.
+					if (viewJsonSchema || !resourceSchema) {
+						rawCode = JSON.stringify(args, null, 2)
+					}
+				}}
+			/>
+		{/if}
+	</div>
+
+	<div>
+		{#if loadingSchema}
+			<Skeleton layout={[[4]]} />
+		{:else if !viewJsonSchema && resourceTypeInfo?.is_fileset}
+			<div class="mt-1 flex items-center gap-2">
+				<h5 class="inline-flex items-center gap-4">Fileset</h5>
+				<ResourceGen
+					bind:args
+					resourceType={resource_type}
+					resourceName={path}
+					resourceDescription={description}
+					{resourceSchema}
+					isFileset
+				/>
+			</div>
+			<FilesetEditor bind:args />
+		{:else if !viewJsonSchema && resourceSchema && resourceSchema?.properties}
+			{#if resourceTypeInfo?.format_extension}
+				<h5 class="mt-1 inline-flex items-center gap-4">
+					File content ({resourceTypeInfo.format_extension})
+				</h5>
+				<div class="">
+					<SimpleEditor
+						autoHeight
+						lang={resourceTypeInfo.format_extension}
+						bind:code={textFileContent}
+						fixedOverflowWidgets={false}
+					/>
+				</div>
+			{:else}
+				<SchemaForm
+					onlyMaskPassword
+					noDelete
+					disabled={!can_write}
+					compact
+					schema={resourceSchema}
+					bind:args
+					bind:isValid
+					{workspace}
+				/>
+			{/if}
+		{:else if !can_write}
+			<input type="text" disabled value={rawCode} />
+		{:else}
+			{#if !viewJsonSchema && !resourceSchema}
+				<div class="flex flex-col gap-2 mb-4">
+					<p class="text-red-500 dark:text-red-400 text-xs">
+						Resource type '{resource_type}' not found in your workspace
+					</p>
+					<SyncResourceTypes resourceType={resource_type} onSynced={() => onLoadResourceType?.()} />
+					<p class="italic text-secondary text-xs"> Define the value in JSON directly </p>
+				</div>
+			{/if}
+
+			{#if !emptyString(jsonError)}<span class="text-red-400 text-xs mb-1 flex flex-row-reverse"
+					>{jsonError}</span
+				>{:else}<div class="py-2"></div>{/if}
+			<div class="bg-surface-tertiary rounded-md border py-2.5">
+				<SimpleEditor autoHeight lang="json" bind:code={rawCode} />
+			</div>
+		{/if}
+	</div>
+</div>

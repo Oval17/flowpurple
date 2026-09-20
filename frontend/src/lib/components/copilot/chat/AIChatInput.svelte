@@ -1,0 +1,1515 @@
+<script lang="ts">
+	import AppAvailableContextList from './AppAvailableContextList.svelte'
+	import ContextElementBadge from './ContextElementBadge.svelte'
+	import ContextTextarea from './ContextTextarea.svelte'
+	import autosize from '$lib/autosize'
+	import {
+		contextElementKey,
+		createAttachedFileContextElement,
+		isSameContextElement,
+		type AppDomSelectorElement,
+		type ContextElement
+	} from './context'
+	import { AIMode } from './AIChatManager.svelte'
+	import { CHAT_INPUT_PADDING, getAiChatManager } from './aiChatManagerContext'
+	import { getChatViewHost } from './chatViewHost'
+	import { composerBoxClass, COMPOSER_FIELD_RESET } from './composerBox'
+	import { formatMention } from './mention'
+	import { twMerge } from 'tailwind-merge'
+	import { tick, untrack, type Snippet } from 'svelte'
+	import Portal from '$lib/components/Portal.svelte'
+	import { zIndexes } from '$lib/zIndexes'
+	import { ArrowUp, Loader2, Square, X } from 'lucide-svelte'
+	import { Button } from '$lib/components/common'
+	import { sendUserToast } from '$lib/toast'
+	import { type PasteAttachment } from './pasteTokens'
+	import { chatDraft, expanded } from './chatDraft'
+	import {
+		fileToAttachedImage,
+		isImageFile,
+		MAX_ATTACHED_IMAGES,
+		MAX_IMAGE_BYTES,
+		type AttachedImage
+	} from './imageUtils'
+	import { modelSupportsVision } from '../modelConfig'
+	import { tryGetCurrentModel } from '$lib/aiStore'
+	import { createLongHash } from '$lib/editorLangUtils'
+	import {
+		fileToAttachedTextFile,
+		MAX_ATTACHED_FILES,
+		MAX_CONVERSATION_FILE_BYTES,
+		MAX_TEXT_FILE_BYTES,
+		textByteLength,
+		type AttachedTextFile
+	} from './textFileUtils'
+	import {
+		fileToAttachedBlob,
+		matchesAccept,
+		MAX_ATTACHED_BLOBS,
+		MAX_BLOB_BYTES,
+		type AttachedBlob
+	} from './blobUtils'
+	import { MessageDraft } from './messageDraft.svelte'
+	import ExpandableImage, {
+		isImageViewerOpen
+	} from '$lib/components/common/image/ExpandableImage.svelte'
+
+	const chatHost = getChatViewHost()
+	// Resolved here, not where it is used: getContext is only legal during component
+	// initialisation, and the mention consumer below runs inside the send gesture.
+	const chatManager = getAiChatManager()
+
+	interface Props {
+		availableContext: ContextElement[]
+		selectedContext: ContextElement[]
+		isFirstMessage?: boolean
+		disabled?: boolean
+		placeholder?: string
+		initialInstructions?: string
+		initialPastes?: PasteAttachment[]
+		initialImages?: AttachedImage[]
+		initialFiles?: AttachedTextFile[]
+		editingMessageIndex?: number | null
+		onEditEnd?: () => void
+		className?: string
+		onClickOutside?: () => void
+		onSendRequest?: (instructions: string) => void
+		showContext?: boolean
+		bottomRightSnippet?: Snippet
+		onKeyDown?: (e: KeyboardEvent) => void
+		// When provided, overrides `chatHost.loading` for the send/stop
+		// button — useful for callers driving their own request lifecycle
+		// (e.g. the inline ⌘K widget runs requests outside the global
+		// `chatHost.loading` flag).
+		loading?: boolean
+		// Called when the user clicks Stop. Defaults to `chatHost.cancel()`.
+		onCancel?: () => void
+		// Observe the composer draft as it changes (the text is local state —
+		// `chatHost.instructions` only carries programmatic prompts). Used by
+		// sessions to persist the typed-but-unsent prompt with the session draft.
+		onDraftChange?: (text: string) => void
+		// tool_call_id of the askUserQuestion the turn is parked on, when it is. A
+		// plain-text draft sent from here answers it instead of queueing behind a
+		// turn that only the answer can resume.
+		pendingQuestionToolCallId?: string
+	}
+
+	let {
+		availableContext,
+		selectedContext = $bindable([]),
+		disabled = false,
+		isFirstMessage = false,
+		placeholder,
+		initialInstructions = '',
+		initialPastes = undefined,
+		initialImages = undefined,
+		initialFiles = undefined,
+		editingMessageIndex = null,
+		onEditEnd = () => {},
+		className = '',
+		onClickOutside = () => {},
+		onSendRequest = undefined,
+		showContext = true,
+		bottomRightSnippet,
+		onKeyDown = undefined,
+		loading,
+		onCancel,
+		onDraftChange = undefined,
+		pendingQuestionToolCallId = undefined
+	}: Props = $props()
+
+	// GLOBAL-mode suggestion pool. We pick one at mount-time so each new
+	// session lands on a different prompt; the choice stays stable for
+	// the lifetime of this input so the placeholder doesn't shuffle as
+	// the user is reading it.
+	const GLOBAL_PLACEHOLDER_SUGGESTIONS = [
+		'Write a hello-world flow',
+		'Create a script that lists files in an S3 bucket',
+		'Build a CRUD app for a customer table',
+		'Schedule a daily cleanup of old runs',
+		'Wrap an existing script into a flow with retries',
+		'Add an HTTP trigger to an existing script',
+		'Generate a report from a SQL query and email it',
+		'Create a Postgres resource and a script that queries it',
+		'Refactor a script to add error handling',
+		'List my workspace flows and scripts'
+	]
+	const globalSuggestion =
+		GLOBAL_PLACEHOLDER_SUGGESTIONS[
+			Math.floor(Math.random() * GLOBAL_PLACEHOLDER_SUGGESTIONS.length)
+		]
+
+	// Generate mode-specific placeholder
+	const modePlaceholder = $derived.by(() => {
+		// The composer unlocks by itself when the other tab's turn ends, so the
+		// placeholder names what it is waiting on (the typing indicator says
+		// where the run is).
+		if (chatHost.runHeldElsewhere) {
+			return 'Waiting for the turn in the other tab to finish'
+		}
+		if (pendingQuestionToolCallId !== undefined) {
+			return 'Answer the question above'
+		}
+
+		if (!isFirstMessage) {
+			return 'Ask followup'
+		}
+
+		if (placeholder) {
+			return placeholder
+		}
+
+		switch (chatHost.mode) {
+			case AIMode.SCRIPT:
+				return 'Modify this script...'
+			case AIMode.FLOW:
+				return 'Modify this flow...'
+			case AIMode.APP:
+				return 'Modify this app...'
+			case AIMode.NAVIGATOR:
+				return 'Navigate Windmill UI...'
+			case AIMode.API:
+				return 'Make API calls...'
+			case AIMode.GLOBAL:
+				return globalSuggestion
+			case AIMode.ASK:
+				return 'Ask questions about Windmill...'
+			default:
+				return 'Ask anything'
+		}
+	})
+
+	let contextTextareaComponent: ContextTextarea | undefined = $state()
+	let instructionsTextareaComponent: HTMLTextAreaElement | undefined = $state()
+	// The four lanes that ship with the next send — text, collapsed big-paste
+	// blobs, per-message images, per-message text files — owned by one draft so
+	// every aggregation applies the draft rules. The composer keeps only the
+	// async in-flight accounting (pending counters, byte reservations).
+	const draft = new MessageDraft(
+		untrack(() => ({
+			text: initialInstructions,
+			pastes: initialPastes ?? [],
+			images: initialImages ?? [],
+			files: initialFiles ?? []
+		}))
+	)
+	// Report edits, never the mount-time value. The first run carries whatever the
+	// composer was constructed with, which is not something the user did: a
+	// composer deliberately mounted empty (its text is already in flight, or
+	// belongs to a session this view is only keeping warm) would otherwise report
+	// '' and overwrite the very prompt it was withholding.
+	let draftReported = false
+	$effect(() => {
+		const text = draft.text
+		untrack(() => {
+			if (!draftReported) {
+				draftReported = true
+				return
+			}
+			onDraftChange?.(text)
+		})
+	})
+
+	// A parked askUserQuestion is a request for input, so a plain-text draft sent
+	// from the composer answers it rather than being queued behind a turn that can
+	// only resume once the question is answered. Attachments can't ride an answer,
+	// so a draft carrying them falls through to the queue and flushes on resume.
+	const questionAnsweredBySend = $derived(
+		editingMessageIndex === null && draft.text.trim() !== '' && !draft.hasAttachments
+			? pendingQuestionToolCallId
+			: undefined
+	)
+
+	/**
+	 * Free slots in one attachment lane, against both that lane's own cap and any limit the
+	 * host's consumer imposes on the turn as a whole — a flow input holding a single file
+	 * caps images and blobs together, not one each. In-flight decodes count: two drops that
+	 * both read the staged count before either resolves would claim the same slots twice.
+	 */
+	function attachmentSlots(laneCap: number, laneStaged: number): number {
+		const laneRemaining = laneCap - laneStaged
+		const turnCap = chatHost.maxMessageAttachments
+		if (turnCap === undefined) return laneRemaining
+		const staged =
+			draft.images.length +
+			pendingImages +
+			draft.files.length +
+			pendingFiles +
+			draft.blobs.length +
+			pendingBlobs
+		// A queue counts too: what is held mid-run merges into one turn on flush, so a
+		// second file accepted now would be dropped there instead of refused here.
+		const queued =
+			chatHost.queuedImages.length + chatHost.queuedFiles.length + chatHost.queuedBlobs.length
+		return Math.min(laneRemaining, Math.max(0, turnCap - staged - queued))
+	}
+
+	/** What to say when the host's own limit is the one that bit. */
+	function turnCapMessage(): string {
+		const turnCap = chatHost.maxMessageAttachments
+		return turnCap === 1
+			? 'This chat sends one attachment per message.'
+			: `This chat sends up to ${turnCap} attachments per message.`
+	}
+
+	/** Why some of what was picked did not fit, naming whichever limit actually bit. */
+	function skippedMessage(laneCap: number, lane: 'images' | 'files', skipped: number): string {
+		return chatHost.maxMessageAttachments !== undefined
+			? `${turnCapMessage()} ${skipped} file(s) were not attached.`
+			: `You can attach up to ${laneCap} ${lane}; ${skipped} were skipped.`
+	}
+
+	// Images being decoded right now. Holds off sending so a message can never go
+	// out without an attachment the user already dropped, and reserves cap slots
+	// against a concurrent drop.
+	let pendingImages = $state(0)
+
+	/** Attach dropped/pasted image files (downscaled + bounded). */
+	export async function addImages(files: (File | Blob)[]) {
+		if (!chatHost.supportsMessageAttachments) return
+		// Attaching can be off despite the chat taking attachments — no object storage to
+		// upload to, say. The `+` renders disabled with the reason; a drop and a paste reach
+		// here instead, and would otherwise become a chip that only fails once sent.
+		const unavailable = chatHost.attachmentsUnavailableReason
+		if (unavailable) {
+			sendUserToast(unavailable, true)
+			return
+		}
+		const imageFiles = files.filter(isImageFile)
+		if (imageFiles.length === 0) return
+		// The vision check is about the model this composer's own turn will hit, so it
+		// only applies to a host that picks that model. Elsewhere the model is chosen
+		// in the flow and tryGetCurrentModel would answer for the wrong one.
+		if (chatHost.supportsModelSettings) {
+			// tryGetCurrentModel returns undefined instead of throwing: this runs from a
+			// drop/paste handler that can't surface a rejection.
+			const model = tryGetCurrentModel()
+			// Only known text-only models fail this, so attaching would certainly 400 the
+			// next turn — refuse rather than warn and send it anyway.
+			if (model && !modelSupportsVision(model.provider, model.model)) {
+				sendUserToast(`${model.model} can't read images. Switch to a vision model first.`, true)
+				return
+			}
+		}
+		// Count decodes already in flight: two drops that both read the image count
+		// before either resolves would each claim the same free slots and overshoot
+		// the cap.
+		const remaining = attachmentSlots(MAX_ATTACHED_IMAGES, draft.images.length + pendingImages)
+		if (remaining <= 0) {
+			sendUserToast(
+				chatHost.maxMessageAttachments !== undefined
+					? turnCapMessage()
+					: `You can attach up to ${MAX_ATTACHED_IMAGES} images.`,
+				true
+			)
+			return
+		}
+		const oversized = imageFiles.filter((f) => f.size > MAX_IMAGE_BYTES)
+		if (oversized.length > 0) {
+			const mb = Math.round(MAX_IMAGE_BYTES / 1_000_000)
+			sendUserToast(`${oversized.length} image(s) over ${mb}MB were skipped.`, true)
+		}
+		const usable = imageFiles.filter((f) => f.size <= MAX_IMAGE_BYTES)
+		if (usable.length === 0) return
+		const batch = usable.slice(0, remaining)
+		if (batch.length < usable.length) {
+			sendUserToast(
+				skippedMessage(MAX_ATTACHED_IMAGES, 'images', usable.length - batch.length),
+				true
+			)
+		}
+		// Claim the slots before awaiting, and hold sending until they resolve:
+		// decoding takes ~50-800ms, and a send during it would clear `images` while
+		// this closure still appends to it, landing the picture on the next message.
+		pendingImages += batch.length
+		try {
+			// One at a time: a decoded bitmap costs ~4 bytes per pixel (a 12MP photo is
+			// ~48MB), so decoding the whole batch at once would hold every one of them
+			// live simultaneously.
+			const added: AttachedImage[] = []
+			let failed = 0
+			for (const file of batch) {
+				try {
+					added.push(await fileToAttachedImage(file))
+				} catch {
+					failed++
+				}
+			}
+			if (added.length > 0) draft.addImages(added)
+			if (failed > 0) sendUserToast(`Could not attach ${failed} image(s).`, true)
+		} finally {
+			pendingImages -= batch.length
+		}
+	}
+
+	function removeImage(index: number) {
+		draft.images = draft.images.filter((_, i) => i !== index)
+	}
+
+	// Files being read right now — same send-hold/slot-reservation role as pendingImages.
+	let pendingFiles = $state(0)
+	// Drop routing resolves file-system handles/entries asynchronously before it
+	// can call addTextFiles/addImages; a send during that window would land the
+	// dropped files on the NEXT message. Holds block sending (no slot or chip
+	// impact) until the drop handler finishes routing.
+	let ingestionHolds = $state(0)
+	export function holdSendForIngestion(): () => void {
+		ingestionHolds += 1
+		let released = false
+		return () => {
+			if (!released) {
+				released = true
+				ingestionHolds -= 1
+			}
+		}
+	}
+	// Bytes those in-flight reads have claimed against the conversation budget:
+	// two overlapping drops that both read the budget before either lands would
+	// otherwise each spend the same remaining allowance.
+	let pendingFileBytes = $state(0)
+
+	// Publish this composer's staged bytes (committed attachments + in-flight
+	// reads) to the manager so a concurrently-mounted composer — the edit box
+	// while editing an earlier message — sees them in its own budget check and
+	// the two can't each spend the whole conversation allowance.
+	const composerKey = untrack(() => createLongHash())
+	let stagedBytes = $derived(
+		draft.files.reduce((sum, f) => sum + textByteLength(f.content), 0) + pendingFileBytes
+	)
+	$effect(() => {
+		chatHost.setComposerStaged(composerKey, editingMessageIndex, stagedBytes)
+	})
+	$effect(() => () => chatHost.clearComposerStaged(composerKey))
+
+	/** Attach dropped/picked text files (sniffed + bounded). */
+	export async function addTextFiles(candidates: File[]) {
+		if (!chatHost.supportsMessageAttachments) return
+		if (candidates.length === 0) return
+		const remaining = attachmentSlots(MAX_ATTACHED_FILES, draft.files.length + pendingFiles)
+		if (remaining <= 0) {
+			sendUserToast(
+				chatHost.maxMessageAttachments !== undefined
+					? turnCapMessage()
+					: `You can attach up to ${MAX_ATTACHED_FILES} files.`,
+				true
+			)
+			return
+		}
+		const oversized = candidates.filter((f) => f.size > MAX_TEXT_FILE_BYTES)
+		if (oversized.length > 0) {
+			const mb = Math.round(MAX_TEXT_FILE_BYTES / 1_000_000)
+			sendUserToast(
+				`${oversized.length} file(s) over ${mb}MB were skipped — link their folder to read them on demand.`,
+				true
+			)
+		}
+		const usable = candidates.filter((f) => f.size <= MAX_TEXT_FILE_BYTES)
+		if (usable.length === 0) return
+		let batch = usable.slice(0, remaining)
+		if (batch.length < usable.length) {
+			sendUserToast(skippedMessage(MAX_ATTACHED_FILES, 'files', usable.length - batch.length), true)
+		}
+		// Conversation-level byte budget: transcript + queue + every live
+		// composer's stage (this one and, mid-edit, the other) + this composer's
+		// own pending reads. File content is persisted with every history save, so
+		// an unbounded total would grow the chat record without limit. The
+		// transcript sum skips any message a composer is editing — that composer's
+		// stage stands in for it, so counting both would charge those bytes twice.
+		let budget =
+			MAX_CONVERSATION_FILE_BYTES -
+			chatHost.attachmentBytesExcluding(composerKey) -
+			draft.files.reduce((sum, f) => sum + textByteLength(f.content), 0) -
+			pendingFileBytes
+		const withinBudget: File[] = []
+		for (const f of batch) {
+			if (f.size <= budget) {
+				withinBudget.push(f)
+				budget -= f.size
+			}
+		}
+		if (withinBudget.length < batch.length) {
+			const mb = Math.round(MAX_CONVERSATION_FILE_BYTES / 1_000_000)
+			sendUserToast(
+				`${batch.length - withinBudget.length} file(s) skipped — this conversation reached its ${mb}MB attachment budget. Link a folder to read larger sets on demand.`,
+				true
+			)
+		}
+		batch = withinBudget
+		if (batch.length === 0) return
+		pendingFiles += batch.length
+		const reservedBytes = batch.reduce((sum, f) => sum + f.size, 0)
+		pendingFileBytes += reservedBytes
+		try {
+			const reads: { name: string; content: string }[] = []
+			let skipped = 0
+			for (const file of batch) {
+				try {
+					const attached = await fileToAttachedTextFile(file)
+					if (attached) reads.push(attached)
+					else skipped++
+				} catch {
+					skipped++
+				}
+			}
+			// Commit through the draft in one synchronous step — fold (dedupe,
+			// courtesy rename) and decoded-byte admission both run against the live
+			// list, so another batch landing between this one's file reads can't be
+			// missed, and malformed input that inflates on decode can't slip past the
+			// raw-size admission above. This batch's own raw reservation is excluded
+			// from the budget — the decoded sizes replace it.
+			const liveBudget =
+				MAX_CONVERSATION_FILE_BYTES -
+				chatHost.attachmentBytesExcluding(composerKey) -
+				draft.files.reduce((sum, f) => sum + textByteLength(f.content), 0) -
+				(pendingFileBytes - reservedBytes)
+			const { droppedAtBudget } = draft.addFiles(reads, liveBudget)
+			if (droppedAtBudget > 0) {
+				const mb = Math.round(MAX_CONVERSATION_FILE_BYTES / 1_000_000)
+				sendUserToast(
+					`${droppedAtBudget} file(s) skipped — this conversation reached its ${mb}MB attachment budget. Link a folder to read larger sets on demand.`,
+					true
+				)
+			}
+			if (skipped > 0) sendUserToast(`Skipped ${skipped} file(s) (non-text).`, true)
+		} finally {
+			pendingFiles -= batch.length
+			pendingFileBytes -= reservedBytes
+		}
+	}
+
+	function removeFile(index: number) {
+		draft.files = draft.files.filter((_, i) => i !== index)
+	}
+
+	// Blobs being read right now — same send-hold/slot-reservation role as pendingImages.
+	let pendingBlobs = $state(0)
+
+	/**
+	 * Attach non-image files through the lane the host reads: text for a host that decodes
+	 * them, blobs for one that forwards them verbatim. The picker, a drop and both pastes all
+	 * route here, and `accept` is re-applied since drops and pastes bypass the picker's filter.
+	 */
+	export async function addNonImageFiles(files: File[]) {
+		if (files.length === 0) return
+		// Same reason as in addImages.
+		const unavailable = chatHost.attachmentsUnavailableReason
+		if (unavailable) {
+			sendUserToast(unavailable, true)
+			return
+		}
+		if (!chatHost.attachmentsAsBlobs) {
+			await addTextFiles(files)
+			return
+		}
+		const allowed = files.filter((f) => matchesAccept(f, chatHost.attachmentAccept))
+		if (allowed.length < files.length) {
+			sendUserToast(
+				`${files.length - allowed.length} file(s) skipped — this chat accepts ${chatHost.attachmentAccept}.`,
+				true
+			)
+		}
+		await addBlobs(allowed)
+	}
+
+	/** Attach files the host takes verbatim (a PDF, say). Kept out of addTextFiles:
+	 * that one decodes to a string and drops anything the binary sniff rejects. */
+	export async function addBlobs(candidates: File[]) {
+		if (!chatHost.supportsMessageAttachments) return
+		if (candidates.length === 0) return
+		const oversized = candidates.filter((f) => f.size > MAX_BLOB_BYTES)
+		if (oversized.length > 0) {
+			const mb = Math.round(MAX_BLOB_BYTES / 1_000_000)
+			sendUserToast(`${oversized.length} file(s) over ${mb}MB were skipped.`, true)
+		}
+		const usable = candidates.filter((f) => f.size <= MAX_BLOB_BYTES)
+		if (usable.length === 0) return
+		const remaining = attachmentSlots(MAX_ATTACHED_BLOBS, draft.blobs.length + pendingBlobs)
+		if (remaining <= 0) {
+			sendUserToast(
+				chatHost.maxMessageAttachments !== undefined
+					? turnCapMessage()
+					: `You can attach up to ${MAX_ATTACHED_BLOBS} files.`,
+				true
+			)
+			return
+		}
+		const batch = usable.slice(0, remaining)
+		if (batch.length < usable.length) {
+			sendUserToast(skippedMessage(MAX_ATTACHED_BLOBS, 'files', usable.length - batch.length), true)
+		}
+		pendingBlobs += batch.length
+		try {
+			const added: AttachedBlob[] = []
+			for (const file of batch) {
+				try {
+					added.push(await fileToAttachedBlob(file))
+				} catch (e) {
+					sendUserToast(`Could not read ${file.name}`, true)
+				}
+			}
+			if (added.length > 0) draft.addBlobs(added)
+		} finally {
+			pendingBlobs -= batch.length
+		}
+	}
+
+	function removeBlob(index: number) {
+		draft.blobs = draft.blobs.filter((_, i) => i !== index)
+	}
+
+	// App mode @ mention state
+	let showAppContextTooltip = $state(false)
+	let appContextTooltipWord = $state('')
+	let appTooltipPosition = $state({ x: 0, y: 0 })
+	let appTooltipElement = $state<HTMLDivElement | undefined>(undefined)
+	let appTooltipCurrentViewNumber = $state(0)
+
+	// Modes that show the rich textarea with @-context support (workspace
+	// scripts, workspace flows, code blocks, DBs, etc.).
+	const isContextEnabledMode = $derived(
+		chatHost.mode === AIMode.SCRIPT ||
+			chatHost.mode === AIMode.FLOW ||
+			chatHost.mode === AIMode.GLOBAL
+	)
+
+	const domSelectorChips = $derived(
+		(selectedContext ?? []).filter((c): c is AppDomSelectorElement => c.type === 'app_dom_selector')
+	)
+
+	const contextKey = contextElementKey
+
+	/** Append `@title` to the textarea so the button-picker path stays in
+	 * sync with the inline `@<word>` mention path — both leave a visible
+	 * token tied to the selectedContext entry, which the textarea diffs on
+	 * to auto-remove items when the user deletes them. No-op when the
+	 * mention is already present so re-picking the same item doesn't
+	 * leave duplicate tokens. */
+	export function insertMention(title: string) {
+		const target = `@${title}`
+		if (draft.text.split(/\s+/).includes(target)) return
+		const sep = draft.text.length === 0 || /\s$/.test(draft.text) ? '' : ' '
+		draft.text = `${draft.text}${sep}${target} `
+	}
+
+	/** Strip every `@title` token from the textarea — used when the user
+	 * deletes the corresponding badge so the badge X-button mirrors the
+	 * inverse (text-delete-to-badge-remove) sync. Only matches `@title` as a
+	 * standalone token (boundary on both sides) so substring matches don't
+	 * bleed into other words; only the whitespace adjacent to the removed
+	 * mention is collapsed so unrelated double-spaces stay intact. */
+	export function removeMention(title: string) {
+		// Pre-zap the textarea's mention diff snapshot so the upcoming strip
+		// doesn't refire the removal effect on a same-title sibling — the host
+		// has already mutated `selectedContext` to drop the targeted entry.
+		contextTextareaComponent?.unsyncMention(title)
+		const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+		const re = new RegExp(`(^|\\s)@${escaped}(\\s|$)`, 'g')
+		draft.text = draft.text.replace(re, (_m, lead, trail) => {
+			// Boundary on at least one side → drop the mention entirely.
+			if (!lead || !trail) return ''
+			// Middle of text: keep ONE of the bracketing whitespace chars so
+			// the surviving tokens are still separated; preserve the leading
+			// one verbatim so newlines/tabs aren't downgraded to spaces.
+			return lead
+		})
+	}
+
+	export function focusInput() {
+		if (isContextEnabledMode) {
+			contextTextareaComponent?.focus()
+		} else {
+			instructionsTextareaComponent?.focus()
+		}
+	}
+
+	// Restore composer contents after a rolled-back turn. No-op when the user
+	// already drafted something new — typed text or attached images (including
+	// ones still decoding) — restoring would clobber it.
+	/** Returns whether the restore was taken: an occupied composer keeps its own
+	 * draft and declines, and the caller must then leave that draft's context
+	 * alone too — restoring context for text that was dropped would retarget the
+	 * draft the user is still writing. */
+	export function restoreInstructions(
+		value: string,
+		restoredPastes: PasteAttachment[] = [],
+		restoredImages: AttachedImage[] = [],
+		restoredFiles: AttachedTextFile[] = []
+	): boolean {
+		// Attachments still decoding/reading (or mid-drop-routing) count as
+		// occupancy too — they belong to a draft the user started even though
+		// their lane is still empty.
+		if (pendingImages > 0 || pendingFiles > 0 || pendingBlobs > 0 || ingestionHolds > 0)
+			return false
+		if (
+			!draft.replaceIfEmpty({
+				text: value,
+				pastes: restoredPastes,
+				images: restoredImages,
+				files: restoredFiles
+			})
+		) {
+			return false
+		}
+		focusInput()
+		return true
+	}
+
+	/** Put text back into the textarea (queued-message delete, or restore
+	 * after a cancelled/errored turn), prepended to any draft so nothing
+	 * the user typed is lost. Restored images join whatever is already
+	 * attached, up to the cap — dropping them would lose the attachment
+	 * silently, which is the whole reason the queue carries them. */
+	export function prependText(
+		text: string,
+		restoredImages: AttachedImage[] = [],
+		restoredFiles: AttachedTextFile[] = [],
+		restoredBlobs: AttachedBlob[] = []
+	): boolean {
+		// mergedIntoDraft: the restored text landed on top of a draft the user was
+		// already writing — both instructions now share one composer, so the caller
+		// must keep both their contexts rather than replacing one with the other.
+		const { mergedIntoDraft, droppedImages, droppedFiles, droppedBlobs } = draft.prepend({
+			text,
+			images: restoredImages,
+			files: restoredFiles,
+			blobs: restoredBlobs
+		})
+		if (droppedImages > 0) {
+			sendUserToast(
+				`You can attach up to ${MAX_ATTACHED_IMAGES} images; ${droppedImages} restored image(s) were dropped.`,
+				true
+			)
+		}
+		if (droppedFiles > 0) {
+			sendUserToast(
+				`You can attach up to ${MAX_ATTACHED_FILES} files; ${droppedFiles} restored file(s) were dropped.`,
+				true
+			)
+		}
+		if (droppedBlobs > 0) {
+			sendUserToast(
+				`You can attach up to ${MAX_ATTACHED_BLOBS} files; ${droppedBlobs} restored file(s) were dropped.`,
+				true
+			)
+		}
+		focusInput()
+		return mergedIntoDraft
+	}
+
+	/** Insert a plain @filename mention for an attached file (used by the @ menu Files category). */
+	export function insertFileMention(name: string) {
+		const sep = draft.text.length === 0 || draft.text.endsWith(' ') ? '' : ' '
+		draft.text = `${draft.text}${sep}${formatMention(name)} `
+		focusInput()
+	}
+
+	/** Copy the last sent message (all four draft lanes + context chips) into
+	 * the composer. The conversation is left untouched — resending creates a new
+	 * message, unlike the bubble's edit pencil which rewinds the conversation. */
+	function recallLastSentMessage(): boolean {
+		const messages = chatHost.displayMessages
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i]
+			if (message.role !== 'user' || message.synthetic) continue
+			// Images come from the stored turn, never the bubble: a provider
+			// rejection strips them from history while the bubble keeps its copy,
+			// and recalling that copy would re-attach the refused image.
+			const images = chatHost.storedImages(i) ?? []
+			// Eligibility looks at the bubble, though: the last thing the user
+			// actually sent is the recall boundary, so a context-only turn (GLOBAL
+			// allows text-free sends with chips) recalls its chips, and a turn
+			// whose only image was provider-rejected recalls as empty — neither
+			// falls through and resurrects an older prompt.
+			if (
+				!(
+					message.content ||
+					message.images?.length ||
+					message.files?.length ||
+					message.contextElements?.length
+				)
+			)
+				continue
+			draft.replace({
+				text: message.content,
+				pastes: message.pastes,
+				images
+			})
+			// The recalled message stays in the transcript, so its files still
+			// count against the conversation budget — re-admit them instead of
+			// copying, or resending would blow past MAX_CONVERSATION_FILE_BYTES.
+			if (message.files?.length) {
+				const budget = MAX_CONVERSATION_FILE_BYTES - chatHost.attachmentBytesExcluding(composerKey)
+				const { droppedAtBudget } = draft.addFiles(message.files, budget)
+				if (droppedAtBudget > 0) {
+					const mb = Math.round(MAX_CONVERSATION_FILE_BYTES / 1_000_000)
+					sendUserToast(
+						`${droppedAtBudget} file(s) not recalled — this conversation reached its ${mb}MB attachment budget.`,
+						true
+					)
+				}
+			}
+			// Chips usually persist in the selection across sends, but the user may
+			// have removed some since — merge the message's chips back in (union,
+			// like dequeue) rather than replace, so chips selected since survive.
+			const missingContext = (message.contextElements ?? []).filter(
+				(c) => !selectedContext.some((s) => isSameContextElement(s, c))
+			)
+			if (missingContext.length > 0) {
+				selectedContext = [...selectedContext, ...missingContext]
+			}
+			focusInput()
+			return true
+		}
+		return false
+	}
+
+	function clickOutside(node: HTMLElement) {
+		function handleClick(event: MouseEvent) {
+			// An expanded image chip renders in a portal, so clicks in it land outside
+			// this node without being outside the composer. Dismissing on them would
+			// discard the edit the user opened the image from.
+			if (isImageViewerOpen()) return
+			if (node && !node.contains(event.target as Node)) {
+				onClickOutside()
+			}
+		}
+
+		document.addEventListener('click', handleClick, true)
+		return {
+			destroy() {
+				document.removeEventListener('click', handleClick, true)
+			}
+		}
+	}
+
+	export async function addContextToSelection(contextElement: ContextElement) {
+		if (!selectedContext || !availableContext) return
+
+		const alreadySelected = selectedContext.find(
+			(c) => c.type === contextElement.type && c.title === contextElement.title
+		)
+		if (alreadySelected) return
+
+		// Workspace items are fetched on-demand and not in availableContext,
+		// so skip the availableContext check for them
+		const isWorkspaceItem =
+			contextElement.type === 'workspace_script' ||
+			contextElement.type === 'workspace_flow' ||
+			contextElement.type === 'workspace_app'
+		if (
+			!isWorkspaceItem &&
+			!availableContext.find(
+				(c) => c.type === contextElement.type && c.title === contextElement.title
+			)
+		) {
+			return
+		}
+
+		let contextToAdd = contextElement
+
+		if (
+			contextElement.type === 'app_datatable' &&
+			chatHost.mode === AIMode.APP &&
+			chatHost.appAiChatHelpers
+		) {
+			const appAiChatHelpers = chatHost.appAiChatHelpers
+			appAiChatHelpers.addTableToWhitelist(
+				contextElement.datatableName,
+				contextElement.schemaName,
+				contextElement.tableName
+			)
+
+			if (!contextElement.columns) {
+				try {
+					contextToAdd = {
+						...contextElement,
+						columns: await appAiChatHelpers.getDatatableTableSchema(
+							contextElement.datatableName,
+							contextElement.schemaName,
+							contextElement.tableName
+						)
+					}
+				} catch (e) {
+					console.error('Failed to load datatable table schema:', e)
+					sendUserToast(
+						'Failed to load datatable table schema',
+						true,
+						[],
+						e instanceof Error ? e.message : String(e)
+					)
+				}
+			}
+		}
+
+		const duplicateAfterAwait = selectedContext.find(
+			(c) => c.type === contextToAdd.type && c.title === contextToAdd.title
+		)
+		if (duplicateAfterAwait) return
+
+		selectedContext = [...selectedContext, contextToAdd]
+	}
+
+	/** Consume inside the submit gesture, never after it: the manager's preflight
+	 * awaits attachment upkeep and a session fork that can take seconds, and
+	 * consuming past them would hand this message a mention the user picked for
+	 * the next one. */
+	function consumeMentionsIfGlobal() {
+		if (chatHost.mode !== AIMode.GLOBAL) return
+		// The mention context belongs to the copilot's own ContextManager, which only
+		// the manager has — the GLOBAL guard above means this host is always it.
+		chatManager.contextManager?.consumeMentionContext()
+	}
+
+	function sendRequest() {
+		// The send button is disabled while decoding, but Enter reaches here directly.
+		// Sending now would drop the in-flight attachments onto the following message.
+		if (pendingImages > 0 || pendingFiles > 0 || pendingBlobs > 0 || ingestionHolds > 0) {
+			return
+		}
+		// A host whose consumer needs a message of its own refuses an attachment-only
+		// turn. Returning before `take()` keeps the chips where the user put them.
+		if (chatHost.requiresMessageText && draft.text.trim() === '') {
+			return
+		}
+		// Read before `take()` empties the draft the id derives from, and only take
+		// once the answer is delivered — an undelivered one would leave the user
+		// with neither their text nor a resumed turn.
+		const answeredQuestionId = questionAnsweredBySend
+		if (
+			answeredQuestionId &&
+			chatHost.handleUserQuestionAnswer(answeredQuestionId, [
+				expanded(chatDraft(draft.text.trim(), draft.pastes))
+			])
+		) {
+			draft.take()
+			// The answer carries only its choice strings, so a mention here rides
+			// nothing — but clearForSend below keeps the selection, which would hand
+			// it to the next turn.
+			consumeMentionsIfGlobal()
+			contextTextareaComponent?.clearForSend()
+			return
+		}
+		if (chatHost.loading) {
+			// Queue the message instead of silently discarding it — it is
+			// auto-sent when the streaming turn completes successfully.
+			// Editing-while-loading keeps the old discard behavior. Paste
+			// tokens are expanded into the queued text (the queue is plain
+			// strings), so the full content survives the auto-send. A GLOBAL
+			// context-only draft counts too (mirrors the idle send guard), and
+			// the selection is pinned to the queued entry so the flush sends the
+			// chips picked at press time.
+			if (
+				editingMessageIndex === null &&
+				(!draft.isEmpty || (chatHost.mode === AIMode.GLOBAL && selectedContext.length > 0))
+			) {
+				const sent = draft.take()
+				chatHost.queueMessage(
+					expanded(chatDraft(sent.text, sent.pastes)),
+					sent.images,
+					[...selectedContext],
+					sent.files,
+					sent.blobs
+				)
+				// Consumed at enqueue, not at flush: the entry above pinned them.
+				consumeMentionsIfGlobal()
+				contextTextareaComponent?.clearForSend()
+			}
+			return
+		}
+		if (editingMessageIndex !== null) {
+			// In edit mode selectedContext is the edit box's own copy (seeded from the
+			// message's original chips), so send exactly what's shown — the user may
+			// have added or removed chips.
+			const sent = draft.take()
+			chatHost.restartGeneration(
+				editingMessageIndex,
+				sent.text,
+				sent.pastes,
+				sent.images,
+				selectedContext,
+				sent.files
+			)
+			onEditEnd()
+		} else {
+			const sent = draft.take()
+			// Pin before consuming: the manager falls back to the live selection only
+			// when given no override, and the consume below empties it.
+			const carried = chatHost.mode === AIMode.GLOBAL ? [...selectedContext] : undefined
+			consumeMentionsIfGlobal()
+			// A host that refuses the turn puts the draft back itself (see AIChatManager's
+			// restoreToInput and FlowChatViewHost's upload failure): restoring here too
+			// would double the text and every attachment.
+			chatHost.sendRequest({
+				instructions: sent.text,
+				pastes: sent.pastes,
+				images: sent.images,
+				files: sent.files,
+				blobs: sent.blobs,
+				contextOverride: carried,
+				contextOverrideOrigin: carried ? 'pinned' : undefined
+			})
+			// clearForSend() pre-zaps the textarea's mention-sync so the wipe doesn't
+			// drop `selectedContext` before the send has settled its context: the pin
+			// above in GLOBAL, the manager's own read of the live selection in
+			// SCRIPT/FLOW. Only mounted in SCRIPT/FLOW/GLOBAL — APP and the fallback
+			// textarea still rely on the draft reset alone (no `@`-mention state to
+			// coordinate).
+			contextTextareaComponent?.clearForSend()
+		}
+	}
+
+	// A custom `onSendRequest` consumer (e.g. the inline ⌘K widget) has no chip
+	// display, so it gets the fully expanded text; the default path keeps tokens
+	// for the conversation bubble and expands them for the LLM inside the manager.
+	function submitRequest() {
+		if (onSendRequest) {
+			onSendRequest(expanded(chatDraft(draft.text, draft.pastes)))
+		} else {
+			sendRequest()
+		}
+	}
+
+	$effect(() => {
+		if (editingMessageIndex !== null) {
+			focusInput()
+		}
+	})
+
+	// Properties to copy for caret position calculation (app mode)
+	const caretProperties = [
+		'direction',
+		'boxSizing',
+		'width',
+		'height',
+		'overflowX',
+		'overflowY',
+		'borderTopWidth',
+		'borderRightWidth',
+		'borderBottomWidth',
+		'borderLeftWidth',
+		'borderStyle',
+		'paddingTop',
+		'paddingRight',
+		'paddingBottom',
+		'paddingLeft',
+		'fontStyle',
+		'fontVariant',
+		'fontWeight',
+		'fontStretch',
+		'fontSize',
+		'fontSizeAdjust',
+		'lineHeight',
+		'fontFamily',
+		'textAlign',
+		'textTransform',
+		'textIndent',
+		'textDecoration',
+		'letterSpacing',
+		'wordSpacing',
+		'tabSize',
+		'MozTabSize'
+	]
+
+	function getCaretCoordinates(element: HTMLTextAreaElement, position: number) {
+		const div = document.createElement('div')
+		div.id = 'input-textarea-caret-position-mirror-div'
+		document.body.appendChild(div)
+
+		const style = div.style
+		const computed = window.getComputedStyle(element)
+		const isInput = element.nodeName === 'INPUT'
+
+		style.whiteSpace = 'pre-wrap'
+		if (!isInput) style.wordWrap = 'break-word'
+
+		style.position = 'absolute'
+		style.visibility = 'hidden'
+
+		caretProperties.forEach(function (prop) {
+			if (isInput && prop === 'lineHeight') {
+				if (computed.boxSizing === 'border-box') {
+					const height = parseInt(computed.height)
+					const outerHeight =
+						parseInt(computed.paddingTop) +
+						parseInt(computed.paddingBottom) +
+						parseInt(computed.borderTopWidth) +
+						parseInt(computed.borderBottomWidth)
+					const targetHeight = outerHeight + parseInt(computed.lineHeight)
+					if (height > targetHeight) {
+						style.lineHeight = height - outerHeight + 'px'
+					} else if (height === targetHeight) {
+						style.lineHeight = computed.lineHeight
+					} else {
+						style.lineHeight = '0'
+					}
+				} else {
+					style.lineHeight = computed.height
+				}
+			} else {
+				style[prop] = computed[prop]
+			}
+		})
+
+		const isFirefox =
+			(window as typeof window & { mozInnerScreenX: number }).mozInnerScreenX != null
+		if (isFirefox) {
+			if (element.scrollHeight > parseInt(computed.height)) style.overflowY = 'scroll'
+		} else {
+			style.overflow = 'hidden'
+		}
+
+		div.textContent = element.value.substring(0, position)
+
+		if (isInput) div.textContent = div.textContent.replace(/\s/g, '\u00a0')
+
+		const span = document.createElement('span')
+		span.textContent = element.value.substring(position) || '.'
+		div.appendChild(span)
+
+		const coordinates = {
+			top: span.offsetTop + parseInt(computed['borderTopWidth']),
+			left: span.offsetLeft + parseInt(computed['borderLeftWidth']),
+			height: parseInt(computed['lineHeight'])
+		}
+
+		document.body.removeChild(div)
+
+		return coordinates
+	}
+
+	async function updateAppTooltipPosition(currentViewItemsNumber: number) {
+		if (!instructionsTextareaComponent) return
+
+		try {
+			const coords = getCaretCoordinates(
+				instructionsTextareaComponent,
+				instructionsTextareaComponent.selectionEnd
+			)
+			const rect = instructionsTextareaComponent.getBoundingClientRect()
+
+			const itemHeight = 28
+			const containerPadding = 8
+			const maxHeight = 192 + containerPadding
+
+			const numItems = currentViewItemsNumber
+			let uncappedHeight =
+				numItems > 0 ? numItems * itemHeight - 4 + containerPadding : containerPadding
+			uncappedHeight = Math.max(uncappedHeight, containerPadding)
+
+			const estimatedTooltipHeight = Math.min(uncappedHeight, maxHeight)
+			const margin = 6
+
+			let finalX = rect.left + coords.left - 70
+			let finalY: number
+
+			if (isFirstMessage) {
+				finalY = rect.top + coords.top + coords.height - 3
+			} else {
+				finalY = rect.top + coords.top - estimatedTooltipHeight - margin
+			}
+
+			appTooltipPosition = {
+				x: finalX,
+				y: finalY
+			}
+
+			await tick()
+
+			if (appTooltipElement) {
+				const tooltipRect = appTooltipElement.getBoundingClientRect()
+				const tooltipWidth = tooltipRect.width
+
+				if (finalX + tooltipWidth > window.innerWidth) {
+					finalX = Math.max(10, window.innerWidth - tooltipWidth - 10)
+
+					appTooltipPosition = {
+						x: finalX,
+						y: finalY
+					}
+				}
+			}
+		} catch (error) {
+			console.error('Error updating tooltip position', error)
+			showAppContextTooltip = false
+		}
+	}
+
+	function handleAppInput(_e: Event) {
+		const words = draft.text.split(/\s+/)
+		const lastWord = words[words.length - 1]
+
+		if (
+			lastWord.startsWith('@') &&
+			(!availableContext.find((c) => c.title === lastWord.slice(1)) ||
+				!selectedContext.find((c) => c.title === lastWord.slice(1)))
+		) {
+			showAppContextTooltip = true
+			appContextTooltipWord = lastWord
+		} else {
+			showAppContextTooltip = false
+			appContextTooltipWord = ''
+		}
+	}
+
+	function handleAppContextSelection(contextElement: ContextElement) {
+		void addContextToSelection(contextElement)
+		// Update instructions with the selected context title
+		const index = draft.text.lastIndexOf('@')
+		if (index !== -1) {
+			draft.text = draft.text.substring(0, index) + `@${contextElement.title}`
+		}
+		showAppContextTooltip = false
+	}
+
+	$effect(() => {
+		if (showAppContextTooltip) {
+			updateAppTooltipPosition(appTooltipCurrentViewNumber)
+		}
+	})
+
+	/**
+	 * Clipboard files on the plain composer, as ContextTextarea does for the rich one. Only
+	 * when the clipboard has no text: a spreadsheet copy carries a bitmap next to the text,
+	 * and pasting a cell range must paste the cells.
+	 */
+	function handlePlainPaste(e: ClipboardEvent) {
+		if (!chatHost.supportsMessageAttachments) return
+		if ((e.clipboardData?.getData('text/plain') ?? '').trim()) return
+		const pasted = Array.from(e.clipboardData?.files ?? [])
+		const images = pasted.filter((f) => f.type.startsWith('image/'))
+		const others = pasted.filter((f) => !f.type.startsWith('image/'))
+		if (images.length === 0 && others.length === 0) return
+		e.preventDefault()
+		if (images.length > 0) void addImages(images)
+		if (others.length > 0) void addNonImageFiles(others)
+	}
+</script>
+
+{#snippet sendStopButton()}
+	<!-- The turn stays `loading` while parked on a question, but a drafted answer
+	     is what the button should ship then — otherwise the only pointer action on
+	     a typed answer would be Stop. Anything else keeps Stop. -->
+	{@const isLoading = (loading ?? chatHost.loading) && !questionAnsweredBySend}
+	{@const emptyDraft = draft.isEmpty}
+	<!-- A text-free GLOBAL draft with context chips is a valid turn (Enter
+	     already sends it), so the button stays enabled there for pointer/touch
+	     parity — mirrors the sendRequest guard. Custom onSendRequest consumers
+	     (inline ⌘K) and editor copilots need content. -->
+	{@const needsText = chatHost.requiresMessageText && draft.text.trim() === ''}
+	<!-- The wording is about the attachment, so it earns its place only once there is one:
+	     an empty composer is the idle state, not a refusal. -->
+	{@const needsTextForAttachment = needsText && !emptyDraft}
+	{@const sendDisabled =
+		disabled ||
+		pendingImages > 0 ||
+		pendingFiles > 0 ||
+		pendingBlobs > 0 ||
+		ingestionHolds > 0 ||
+		needsText ||
+		(emptyDraft &&
+			(onSendRequest !== undefined ||
+				chatHost.mode !== AIMode.GLOBAL ||
+				selectedContext.length === 0))}
+	<Button
+		variant="subtle"
+		unifiedSize="md"
+		iconOnly
+		title={isLoading
+			? 'Stop'
+			: needsTextForAttachment
+				? 'Write a message to send with the attachment'
+				: 'Send'}
+		startIcon={{ icon: isLoading ? Square : ArrowUp }}
+		disabled={!isLoading && sendDisabled}
+		on:click={() => {
+			if (isLoading) {
+				onCancel ? onCancel() : chatHost.cancel()
+			} else if (!sendDisabled) {
+				submitRequest()
+			}
+		}}
+	/>
+{/snippet}
+
+<!-- One wrapping row for every badge-shaped chip: selected context (or, when the
+     picker row is hidden — showContext=false in GLOBAL/session mode — the raw-app
+     inspector's DOM picks, which always show), then message files. Only image
+     thumbnails get their own row (different height). -->
+{#snippet badgeRow()}
+	{@const contextChips = showContext ? selectedContext : domSelectorChips}
+	{#if contextChips.length > 0 || draft.files.length > 0 || pendingFiles > 0 || draft.blobs.length > 0 || pendingBlobs > 0}
+		<div class="flex flex-row flex-wrap items-center gap-1 px-2.5 pt-2">
+			{#each contextChips as element (contextKey(element))}
+				<ContextElementBadge
+					contextElement={element}
+					deletable
+					onDelete={() => {
+						selectedContext = selectedContext?.filter((c) => !isSameContextElement(c, element))
+						if (showContext) removeMention(element.title)
+					}}
+				/>
+			{/each}
+			{#each draft.files as file, i (i)}
+				<ContextElementBadge
+					contextElement={createAttachedFileContextElement(file.name, file.content)}
+					deletable
+					onDelete={() => removeFile(i)}
+				/>
+			{/each}
+			<!-- Blobs are shown by the same badge as text files. Their preview line stands
+			     in for content the badge cannot render (a PDF has no text to show). -->
+			{#each draft.blobs as blob, i (i)}
+				<ContextElementBadge
+					contextElement={createAttachedFileContextElement(
+						blob.name,
+						`${blob.mediaType} · ${Math.max(1, Math.round(blob.size / 1024))} KB`
+					)}
+					deletable
+					onDelete={() => removeBlob(i)}
+				/>
+			{/each}
+			{#each { length: pendingFiles + pendingBlobs } as _, i (i)}
+				<div
+					class="h-6 w-24 rounded-md border bg-surface flex items-center justify-center"
+					title="Reading file..."
+				>
+					<Loader2 size={14} class="animate-spin text-tertiary" />
+				</div>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet imageChipsRow()}
+	{#if draft.images.length > 0 || pendingImages > 0}
+		<div class="flex flex-row flex-wrap items-center gap-1.5 px-2.5 pt-2">
+			{#each draft.images as image, i (i)}
+				<div class="relative group">
+					<!-- The chip is a 48px object-cover crop, so the expanded view is the only
+					     way to check what was actually attached before sending it. -->
+					<ExpandableImage
+						src={image.dataUrl}
+						alt={image.name ?? 'attached image'}
+						class="h-12 w-12 object-cover rounded border border-border-light"
+					/>
+					<button
+						type="button"
+						title="Remove image"
+						class="absolute -top-1.5 -right-1.5 bg-surface-secondary border border-border-light rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+						onclick={() => removeImage(i)}
+					>
+						<X size={10} />
+					</button>
+				</div>
+			{/each}
+			<!-- Placeholders for images still being decoded. Sending is held until they
+			     land, so the row has to show that something is on its way. -->
+			{#each { length: pendingImages } as _, i (i)}
+				<div
+					class="h-12 w-12 rounded border border-border-light bg-surface-secondary flex items-center justify-center"
+					title="Preparing image..."
+				>
+					<Loader2 size={14} class="animate-spin text-tertiary" />
+				</div>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
+
+<div
+	use:clickOutside
+	class="relative mt-1"
+	role="presentation"
+	onkeydown={(e) => {
+		if (e.key === 'Escape' && chatHost.loading) {
+			e.preventDefault()
+			chatHost.cancel()
+		} else if (
+			e.key === 'ArrowUp' &&
+			!e.defaultPrevented &&
+			e.target instanceof HTMLTextAreaElement &&
+			editingMessageIndex === null &&
+			onSendRequest === undefined &&
+			draft.isEmpty &&
+			pendingImages === 0 &&
+			pendingFiles === 0 &&
+			pendingBlobs === 0 &&
+			ingestionHolds === 0
+		) {
+			// Shell-style recall: ArrowUp in the empty main composer pulls the
+			// queued message (if any, same as the queued-message chip's click/X)
+			// or otherwise a copy of the last sent message back into the input.
+			// Empty means no attachment still decoding/reading either —
+			// recalling over an attachments-only draft would clobber it.
+			// Textarea only — ArrowUp on the wrapper's buttons/badges must not
+			// mutate the composer; and main composer only — the edit input and
+			// custom-send consumers (inline widget) have their own history
+			// semantics.
+			if (
+				chatHost.queuedMessage ||
+				chatHost.queuedImages.length > 0 ||
+				chatHost.queuedFiles.length > 0 ||
+				chatHost.queuedBlobs.length > 0 ||
+				(chatHost.queuedContext?.length ?? 0) > 0
+			) {
+				e.preventDefault()
+				chatHost.dequeueMessage()
+			} else if (!chatHost.sendInFlight && recallLastSentMessage()) {
+				// History recall waits for the in-flight turn: from the moment the
+				// composer clears, the turn's bubble, stored images and context land
+				// across several awaits, so recalling now would return an incomplete
+				// copy — or skip past the turn entirely. Dequeueing above stays
+				// available; the queue is composer state, not history.
+				e.preventDefault()
+			}
+		}
+	}}
+>
+	{#if isContextEnabledMode}
+		<div class="relative">
+			<ContextTextarea
+				bind:this={contextTextareaComponent}
+				bind:value={draft.text}
+				bind:pastes={draft.pastes}
+				onImageFiles={chatHost.supportsMessageAttachments
+					? (pasted) => void addImages(pasted)
+					: undefined}
+				onTextFiles={chatHost.supportsMessageAttachments
+					? (pasted) => void addNonImageFiles(pasted)
+					: undefined}
+				{availableContext}
+				{selectedContext}
+				placeholder={modePlaceholder}
+				onAddContext={(contextElement) => void addContextToSelection(contextElement)}
+				onRemoveContext={(element) => {
+					selectedContext = selectedContext?.filter((c) => !isSameContextElement(c, element))
+				}}
+				onSendRequest={() => {
+					if (disabled) {
+						return
+					}
+					submitRequest()
+				}}
+				{disabled}
+				{onKeyDown}
+			>
+				{#snippet leading()}
+					{@render badgeRow()}
+					{@render imageChipsRow()}
+				{/snippet}
+			</ContextTextarea>
+			{#if !bottomRightSnippet}
+				<div class="absolute bottom-1 right-1">
+					{@render sendStopButton()}
+				</div>
+			{/if}
+		</div>
+	{:else if chatHost.mode === AIMode.APP}
+		{#if showContext}
+			{@render badgeRow()}
+		{/if}
+		<div class={twMerge('relative w-full scroll-pb-2', className)}>
+			<textarea
+				bind:this={instructionsTextareaComponent}
+				bind:value={draft.text}
+				use:autosize={{ maxHeight: '40vh' }}
+				oninput={handleAppInput}
+				onblur={() => {
+					setTimeout(() => {
+						showAppContextTooltip = false
+					}, 200)
+				}}
+				onkeydown={(e) => {
+					if (onKeyDown) {
+						onKeyDown(e)
+					}
+					if (showAppContextTooltip) {
+						// avoid new line after Enter in the tooltip
+						if (e.key === 'Enter') {
+							e.preventDefault()
+						}
+						return
+					}
+					if (e.key === 'Enter' && !e.shiftKey) {
+						e.preventDefault()
+						sendRequest()
+					}
+				}}
+				rows={1}
+				placeholder={modePlaceholder}
+				class={twMerge('resize-none', CHAT_INPUT_PADDING)}
+				{disabled}
+			></textarea>
+			{#if !bottomRightSnippet}
+				<div class="absolute bottom-1 right-1">
+					{@render sendStopButton()}
+				</div>
+			{/if}
+		</div>
+		{#if showAppContextTooltip}
+			<Portal target="body">
+				<div
+					bind:this={appTooltipElement}
+					class="absolute bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg"
+					style="left: {appTooltipPosition.x}px; top: {appTooltipPosition.y}px; z-index: {zIndexes.tooltip};"
+				>
+					<AppAvailableContextList
+						{availableContext}
+						{selectedContext}
+						onSelect={(element) => {
+							handleAppContextSelection(element)
+						}}
+						showAllAvailable={true}
+						stringSearch={appContextTooltipWord.slice(1)}
+						onViewChange={(newNumber) => {
+							appTooltipCurrentViewNumber = newNumber
+						}}
+						setShowing={(showing) => {
+							showAppContextTooltip = showing
+						}}
+					/>
+				</div>
+			</Portal>
+		{/if}
+	{:else}
+		<!-- Same box as the rich composer above, so a host on the plain textarea shows
+		     the identical chip rows inside the identical field. -->
+		<div class={composerBoxClass(disabled)}>
+			{@render badgeRow()}
+			{@render imageChipsRow()}
+			<div class={twMerge('relative w-full', className)}>
+				<textarea
+					bind:this={instructionsTextareaComponent}
+					bind:value={draft.text}
+					use:autosize={{ maxHeight: '40vh' }}
+					onpaste={handlePlainPaste}
+					onkeydown={(e) => {
+						if (onKeyDown) {
+							onKeyDown(e)
+						}
+						// An Enter that confirms an IME composition (Japanese, Chinese) is not a
+						// send; it would ship the unfinished text.
+						if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+							e.preventDefault()
+							sendRequest()
+						}
+					}}
+					rows={1}
+					placeholder={modePlaceholder}
+					class={twMerge('resize-none', COMPOSER_FIELD_RESET, CHAT_INPUT_PADDING)}
+					{disabled}
+				></textarea>
+				{#if !bottomRightSnippet}
+					<div class="absolute bottom-1 right-1">
+						{@render sendStopButton()}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+	{#if bottomRightSnippet}
+		<div class="absolute bottom-1 right-1">
+			{@render bottomRightSnippet()}
+		</div>
+	{/if}
+</div>
