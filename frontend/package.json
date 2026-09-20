@@ -144,7 +144,7 @@
 		"p-limit": "^6.1.0",
 		"panzoom": "^9.4.3",
 		"pdfjs-dist": "4.8.69",
-		"quicktype-core": "^23.2.6",
+		"quicktype-core": "^26.0.0",
 		"quill": "^2.0.3",
 		"rehype-github-alerts": "^3.0.0",
 		"rehype-raw": "^7.0.0",
