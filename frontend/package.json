@@ -41,7 +41,7 @@
 		"@typescript-eslint/parser": "^5.60.0",
 		"@zerodevx/svelte-toast": "^0.9.6",
 		"autoprefixer": "^10.4.13",
-		"cssnano": "^6.0.1",
+		"cssnano": "^9.0.4",
 		"d3-dag": "^0.11.5",
 		"dts-bundle-generator": "^9.5.1",
 		"eslint": "^8.47.0",
