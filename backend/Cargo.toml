@@ -523,7 +523,7 @@ itertools = "^0.14.0"
 regex = "^1"
 semver = "^1"
 aws-sigv4 = "^1.3.4"
-aws-sdk-config = "=1.68.0"
+aws-sdk-config = "=1.101.0"
 aws-sdk-rds = "^1"
 async-trait = "0.1.88"
 
