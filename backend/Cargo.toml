@@ -540,7 +540,7 @@ v8 = "=137.1.0"  # Exact version NOTE: Do not forget to update version and hash 
 deno_fetch = "0.233.0"
 deno_tls = "0.196.0"
 deno_console = "0.209.0"
-deno_url = "0.209.0"
+deno_url = "0.222.0"
 deno_webidl = "0.209.0"
 deno_web = "0.240.0"
 # Sibling release of the pinned deno_core 0.352 / deno_web 0.240 stack
