@@ -3988,7 +3988,7 @@ dependencies = [
  "deno_fs",
  "deno_path_util",
  "deno_permissions",
- "deno_tls",
+ "deno_tls 0.196.0",
  "dyn-clone",
  "error_reporter",
  "h2 0.4.19",
@@ -4100,7 +4100,7 @@ dependencies = [
  "deno_error 0.6.1",
  "deno_features",
  "deno_permissions",
- "deno_tls",
+ "deno_tls 0.196.0",
  "hickory-proto",
  "hickory-resolver",
  "pin-project",
@@ -4196,7 +4196,7 @@ dependencies = [
  "async-trait",
  "deno_core",
  "deno_error 0.6.1",
- "deno_tls",
+ "deno_tls 0.196.0",
  "http-body-util",
  "hyper 1.11.1",
  "hyper-rustls 0.27.9",
@@ -4229,6 +4229,25 @@ name = "deno_tls"
 version = "0.196.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7835eb6a8d114703b0293573fbb8885bc2c81e8c35363b9e89391dd3c541fa6"
+dependencies = [
+ "deno_core",
+ "deno_error 0.6.1",
+ "deno_native_certs",
+ "rustls 0.23.35",
+ "rustls-pemfile 2.2.0",
+ "rustls-tokio-stream",
+ "rustls-webpki 0.102.8",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "deno_tls"
+version = "0.197.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e97f821da1ad133c04d447107ba58ef20c63c6840212a7facf9153b24ed414d0"
 dependencies = [
  "deno_core",
  "deno_error 0.6.1",
@@ -16251,7 +16270,7 @@ dependencies = [
  "deno_net",
  "deno_permissions",
  "deno_telemetry",
- "deno_tls",
+ "deno_tls 0.197.0",
  "deno_url",
  "deno_web",
  "deno_webidl",
