@@ -16747,7 +16747,7 @@ dependencies = [
  "mime_guess",
  "mysql_async",
  "native-tls",
- "nix 0.27.1",
+ "nix 0.31.3",
  "once_cell",
  "opentelemetry 0.30.0",
  "opentelemetry-proto 0.30.0",
