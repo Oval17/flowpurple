@@ -755,4 +755,4 @@ hyper-http-proxy = { version = "1", default-features = false, features = ["rustl
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-native-certs = "0.8"
-rcgen = "0.13"
+rcgen = "0.14"

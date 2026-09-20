@@ -50,7 +50,7 @@ sqlx.workspace = true
 rustls.workspace = true
 
 [dev-dependencies]
-rcgen = "0.13.2"
+rcgen = "0.14.10"
 
 [build-dependencies]
 deno_fetch.workspace = true
