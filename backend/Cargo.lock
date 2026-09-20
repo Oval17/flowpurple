@@ -4025,7 +4025,7 @@ dependencies = [
  "boxed_error",
  "deno_core",
  "deno_error 0.6.1",
- "deno_io",
+ "deno_io 0.119.0",
  "deno_path_util",
  "deno_permissions",
  "filetime",
@@ -4049,7 +4049,33 @@ dependencies = [
  "async-trait",
  "deno_core",
  "deno_error 0.6.1",
- "deno_subprocess_windows",
+ "deno_subprocess_windows 0.4.0",
+ "filetime",
+ "fs3",
+ "libc",
+ "log",
+ "nix 0.27.1",
+ "once_cell",
+ "os_pipe",
+ "parking_lot",
+ "pin-project",
+ "rand 0.8.5",
+ "tokio",
+ "uuid",
+ "winapi",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "deno_io"
+version = "0.120.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd50aab7700c7ce1bd1f3490d94556b8a6683f6627c7371b46597291c874fc23"
+dependencies = [
+ "async-trait",
+ "deno_core",
+ "deno_error 0.6.1",
+ "deno_subprocess_windows 0.5.0",
  "filetime",
  "fs3",
  "libc",
@@ -4180,6 +4206,18 @@ name = "deno_subprocess_windows"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bc6b10059f0ccb14c6e0319c5275f0407fb2f9ffe405cd555700561999ea4bf"
+dependencies = [
+ "fastrand 2.5.0",
+ "futures-channel",
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "deno_subprocess_windows"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97a6476986714fd134f8e93677c0dff44bd70aa87b5552c8bb33fa1ca52ea8a1"
 dependencies = [
  "fastrand 2.5.0",
  "futures-channel",
@@ -16247,7 +16285,7 @@ dependencies = [
  "deno_error 0.6.1",
  "deno_fetch",
  "deno_fs",
- "deno_io",
+ "deno_io 0.120.0",
  "deno_net",
  "deno_permissions",
  "deno_telemetry",
