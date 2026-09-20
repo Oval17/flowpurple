@@ -1,0 +1,354 @@
+import {
+	JobService,
+	type Flow,
+	type FlowModule,
+	type InputTransform,
+	type Job,
+	type RestartedFrom,
+	type OpenFlow,
+	type FlowValue,
+	type Retry
+} from '$lib/gen'
+import { workspaceStore } from '$lib/stores'
+import { cleanExpr, emptySchema } from '$lib/utils'
+import { unescapeTemplateBackticks } from '$lib/utils/templateLiteral'
+import { get } from 'svelte/store'
+import type { FlowModuleState } from './flowState'
+import { type PickableProperties, dfs } from './previousResults'
+import { forEachFlowModule } from './dfs'
+import { withAgentDrafts } from './linkedAgentDrafts'
+import { NEVER_TESTED_THIS_FAR } from './models'
+import { sendUserToast } from '$lib/toast'
+import type { ExtendedOpenFlow } from './types'
+import type { GraphModuleState } from '../graph'
+import type { ModulesTestStates } from '../modulesTest.svelte'
+
+function create_context_function_template(eval_string: string, context: Record<string, any>) {
+	return `
+return function (context) {
+"use strict";
+${
+	Object.keys(context).length > 0
+		? `let ${Object.keys(context).map((key) => ` ${key} = context['${key}']`)};`
+		: ``
+}
+return ${eval_string}
+}`
+}
+
+function make_context_evaluator(eval_string, context): (context) => any {
+	let template = create_context_function_template(eval_string, context)
+	let functor = Function(template)
+	return functor()
+}
+
+export function evalValue(
+	k: string,
+	mod: FlowModule,
+	pickableProperties: PickableProperties | undefined,
+	showError: boolean
+): any {
+	let inputTransforms = (mod.value['input_transforms'] ?? {}) as Record<string, InputTransform>
+	let v: any
+	let t = inputTransforms?.[k]
+
+	if (t?.type == 'static') {
+		v = t.value
+	} else if (t?.type == 'javascript') {
+		try {
+			let context = {
+				flow_input: pickableProperties?.flow_input,
+				results: pickableProperties?.priorIds
+			}
+			v = make_context_evaluator(t.expr, context)(context)
+		} catch (e) {
+			if (showError) {
+				sendUserToast(`Error evaluating ${k}: ${e.message}`, true)
+			}
+			v = undefined
+		}
+	} else {
+		v = undefined
+	}
+	if (v === NEVER_TESTED_THIS_FAR) {
+		v = undefined
+	}
+	return v
+}
+
+/** Ensure modules comes first and groups last in the value object for readable YAML export. */
+function reorderFlowValue(value: ExtendedOpenFlow['value']): ExtendedOpenFlow['value'] {
+	const { modules, groups, ...rest } = value
+	return { modules, ...rest, ...(groups != null ? { groups } : {}) }
+}
+
+export function filteredContentForExport(flow: ExtendedOpenFlow) {
+	let o = {
+		summary: flow.summary,
+		description: flow.description,
+		value: reorderFlowValue(flow.value),
+		schema: flow.schema
+	}
+	if (flow.dedicated_worker) {
+		o['dedicated_worker'] = flow.dedicated_worker
+	}
+	if (flow.visible_to_runner_only) {
+		o['visible_to_runner_only'] = flow.visible_to_runner_only
+	}
+	if (flow.on_behalf_of_email) {
+		o['on_behalf_of_email'] = flow.on_behalf_of_email
+	}
+	if (flow.on_behalf_of) {
+		o['on_behalf_of'] = flow.on_behalf_of
+	}
+	if (flow.ws_error_handler_muted) {
+		o['ws_error_handler_muted'] = flow.ws_error_handler_muted
+	}
+	if (flow.tag) {
+		o['tag'] = flow.tag
+	}
+	return o
+}
+
+import { dfs as dfsApply } from './dfs'
+
+export function cleanFlow(flow: OpenFlow | any): OpenFlow & {
+	tag?: string
+	ws_error_handler_muted?: boolean
+	dedicated_worker?: boolean
+	visible_to_runner_only?: boolean
+	on_behalf_of_email?: string
+	on_behalf_of?: string
+} {
+	const newFlow: Flow = $state.snapshot(flow)
+
+	dfsApply(newFlow.value.modules, (mod) => {
+		if (mod.value.type == 'rawscript' || mod.value.type == 'script') {
+			Object.values(mod.value.input_transforms ?? {}).forEach((inp) => {
+				// for now we use the value for dynamic expression when done in the static editor so we have to resort to this
+				if (inp.type == 'javascript') {
+					//@ts-ignore
+					inp.value = undefined
+					inp.expr = cleanExpr(inp.expr)
+				} else {
+					//@ts-ignore
+					inp.expr = undefined
+				}
+			})
+		}
+		if (mod.value.type == 'rawscript' && mod.value.assets?.length == 0) {
+			mod.value.assets = undefined
+		}
+		if (mod.value.type === 'aiagent') {
+			normalizeAgentHistory(mod.value.input_transforms, newFlow.value.chat_input_enabled ?? false)
+		}
+	})
+	if (newFlow.value.concurrency_key == '') {
+		newFlow.value.concurrency_key = undefined
+	}
+
+	return newFlow
+}
+
+/**
+ * A baked legacy id is dropped in a chat flow, which runs on the conversation id; elsewhere it
+ * stays until the author converts it. Blank static history inputs read as unset and managed
+ * memory keeping no messages runs as off, so each is saved as what it runs as.
+ */
+export function normalizeAgentHistory(
+	inputTransforms: Record<string, any> | undefined,
+	chatInputEnabled: boolean
+) {
+	if (!inputTransforms) return
+	const memory = inputTransforms.memory
+	if (
+		memory?.type === 'static' &&
+		memory.value?.kind === 'window' &&
+		!memory.value.context_length
+	) {
+		memory.value = { kind: 'off' }
+	}
+	if (
+		memory?.type === 'static' &&
+		memory.value?.kind === 'auto' &&
+		'memory_id' in memory.value &&
+		(chatInputEnabled || !String(memory.value.memory_id ?? '').trim())
+	) {
+		const { memory_id: _, ...policy } = memory.value
+		memory.value = policy
+	}
+	const memoryId = inputTransforms.memory_id
+	if (memoryId?.type === 'static' && !String(memoryId.value ?? '').trim()) {
+		delete inputTransforms.memory_id
+	}
+	const previousMessages = inputTransforms.previous_messages
+	if (previousMessages?.type === 'static' && !previousMessages.value?.length) {
+		delete inputTransforms.previous_messages
+	}
+}
+
+export function getDefaultExpr(
+	key: string = 'myfield',
+	previousModuleId: string | undefined,
+	previousExpr?: string
+) {
+	return (
+		previousExpr ?? (previousModuleId ? `results.${previousModuleId}.${key}` : `flow_input.${key}`)
+	)
+}
+
+export function jobsToResults(jobs: Job[]) {
+	return jobs.map((job) => {
+		if ('result' in job) {
+			return job.result
+		} else if (Array.isArray(job)) {
+			return jobsToResults(job)
+		}
+	})
+}
+
+/**
+ * Run the flow the editor currently holds. A step linked to a saved agent runs that agent's
+ * unsaved draft when there is one (`withAgentDrafts`), so testing exercises what the agent editor
+ * is showing rather than the deployed resource — the same rule the agent editor's own test pane
+ * follows. The value passed in is left alone; only what goes to the server is substituted.
+ */
+export async function runFlowPreview(
+	args: Record<string, any>,
+	flow: OpenFlow & { tag?: string },
+	path: string,
+	restartedFrom: RestartedFrom | undefined,
+	conversationId?: string | undefined,
+	tempScriptRefs?: Record<string, string>,
+	// The session's acting workspace when previewing inside an AI-session flow
+	// editor; falls back to the navigation workspace for full-page previews.
+	workspace?: string
+) {
+	const ws = workspace ?? get(workspaceStore) ?? ''
+	const value = await withAgentDrafts(flow.value, ws)
+	return await JobService.runFlowPreview({
+		workspace: ws,
+		requestBody: {
+			args,
+			value,
+			path: path,
+			tag: flow.tag,
+			restarted_from: restartedFrom,
+			temp_script_refs: tempScriptRefs
+		},
+		memoryId: conversationId
+	})
+}
+
+export function codeToStaticTemplate(code?: string): string | undefined {
+	if (!code || typeof code != 'string') return undefined
+
+	const lines = code.split('\n')
+	if (lines.length == 1) {
+		const line = lines[0].trim()
+		if (line[0] == '`' && line.charAt(line.length - 1) == '`') {
+			return unescapeTemplateBackticks(line.slice(1, line.length - 1))
+		} else {
+			return `\$\{${line}\}`
+		}
+	}
+	return undefined
+}
+
+export function emptyFlowModuleState(): FlowModuleState {
+	return {
+		schema: emptySchema(),
+		previewResult: NEVER_TESTED_THIS_FAR
+	}
+}
+
+// `same_worker` hands the next step directly to the worker holding `./shared`, bypassing
+// `scheduled_for`: a retry delay is silently ignored, and a sleep breaks the hand-off so the
+// next step can land on another worker without `./shared`. Keep the two mutually exclusive.
+export const SAME_WORKER_INCOMPATIBLE_MSG =
+	'Retries and sleeps are not compatible with the shared directory (`Same Worker`): retry delays would be ignored and a sleep would lose the `./shared` folder.'
+
+// Mirrors the backend's `Retry::has_attempts`: a retry with no attempt never runs, and the
+// retries tab renders it as "Disabled", so it must not block anything.
+function hasRetryAttempts(retry: Retry | undefined): boolean {
+	return (retry?.constant?.attempts ?? 0) > 0 || (retry?.exponential?.attempts ?? 0) > 0
+}
+
+export function modulesWithRetryOrSleep(flow: FlowValue): string[] {
+	// The failure and preprocessor modules live outside `modules` but run as regular steps on
+	// the same-worker hand-off. Agent tools don't: they never go through the flow scheduler.
+	const roots = [flow.modules, flow.failure_module, flow.preprocessor_module]
+		.flat()
+		.filter((m) => m != undefined)
+	const ids: string[] = []
+	forEachFlowModule(
+		roots,
+		(m) => {
+			if (hasRetryAttempts(m.retry) || m.sleep != undefined) {
+				ids.push(m.id)
+			}
+		},
+		{ skipToolNodes: true }
+	)
+	return ids
+}
+
+export function checkIfParentLoop(
+	flowStore: ExtendedOpenFlow,
+	modId: string
+): { id: string; type: 'forloopflow' | 'whileloopflow' } | undefined {
+	const flow: ExtendedOpenFlow = JSON.parse(JSON.stringify(flowStore))
+	const parents = dfs(modId, flow, true)
+	for (const parent of parents.slice(1)) {
+		if (parent.value.type === 'forloopflow' || parent.value.type === 'whileloopflow') {
+			return { id: parent.id, type: parent.value.type }
+		}
+	}
+	return undefined
+}
+
+/**
+ * Updates moduleStates based on test job data from modulesTestStates
+ * Extracts job information and converts it to GraphModuleState format
+ * for graph rendering
+ */
+export function updateDerivedModuleStatesFromTestJobs(
+	moduleId: string | undefined,
+	moduleTestStates: ModulesTestStates | undefined,
+	moduleStates: Record<string, GraphModuleState> | undefined
+) {
+	if (!moduleId || !moduleTestStates || !moduleStates) {
+		return
+	}
+	const newStates: Record<string, GraphModuleState> = {}
+
+	const testState = moduleTestStates?.states[moduleId]
+	if (testState) {
+		if (testState.testJob) {
+			const job = testState.testJob
+
+			// Create GraphModuleState from job data
+			const moduleState: GraphModuleState = {
+				args: job.args,
+				type: job.type === 'QueuedJob' ? 'InProgress' : job['success'] ? 'Success' : 'Failure',
+				job_id: job.id,
+				tag: job.tag,
+				duration_ms: job['duration_ms'],
+				started_at: job.started_at ? new Date(job.started_at).getTime() : undefined
+			}
+
+			newStates[moduleId] = moduleState
+		} else if (testState.loading) {
+			// If test is loading, show as InProgress
+			newStates[moduleId] = {
+				type: 'InProgress',
+				args: {}
+			}
+		}
+	}
+
+	return {
+		...moduleStates,
+		...newStates
+	}
+}

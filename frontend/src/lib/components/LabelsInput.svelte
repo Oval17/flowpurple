@@ -1,0 +1,203 @@
+<script lang="ts">
+	import Badge from './common/badge/Badge.svelte'
+	import Button from './common/button/Button.svelte'
+	import { Plus, Tag, X } from 'lucide-svelte'
+	import { useOperatingWorkspace } from '$lib/components/operatingWorkspace.svelte'
+
+	const operatingWorkspace = useOperatingWorkspace()
+
+	interface Props {
+		labels: string[] | undefined
+		onchange?: () => void
+		class?: string
+		/** Suggest the labels of this workspace rather than the active one, for an editor
+		 * aimed elsewhere (the folder drawer opened from a cross-workspace picker). */
+		workspace?: string
+		/** Text typed into the input but not yet added to `labels`. An editor with a Save
+		 * button needs it: without it that text is invisible to the editor's dirty state,
+		 * so it is silently dropped on close and cannot even enable Save on its own. */
+		onPendingChange?: (pending: string) => void
+	}
+
+	let {
+		labels = $bindable(),
+		onchange,
+		class: clazz = '',
+		workspace,
+		onPendingChange
+	}: Props = $props()
+
+	let adding = $state(false)
+	let inputValue = $state('')
+	let inputEl: HTMLInputElement | undefined = $state()
+	let existingLabels: string[] = $state([])
+	let selectedIdx = $state(-1)
+
+	let suggestions = $derived(
+		existingLabels
+			.filter(
+				(l) =>
+					(!inputValue || l.toLowerCase().includes(inputValue.toLowerCase())) &&
+					!(labels ?? []).includes(l)
+			)
+			.slice(0, 8)
+	)
+	let trimmedInput = $derived(inputValue.trim())
+	let showCreateNew = $derived(
+		trimmedInput.length > 0 &&
+			!suggestions.some((s) => s.toLowerCase() === trimmedInput.toLowerCase()) &&
+			!(labels ?? []).includes(trimmedInput)
+	)
+
+	$effect(() => {
+		onPendingChange?.(adding ? trimmedInput : '')
+	})
+
+	async function loadExistingLabels() {
+		try {
+			const resp = await fetch(`/api/w/${workspace ?? $operatingWorkspace}/labels/list`)
+			if (resp.ok) existingLabels = await resp.json()
+		} catch {}
+	}
+
+	function startAdding() {
+		adding = true
+		inputValue = ''
+		selectedIdx = -1
+		loadExistingLabels()
+		setTimeout(() => inputEl?.focus(), 0)
+	}
+
+	function addLabel(value?: string) {
+		const v = (value ?? inputValue).trim().slice(0, 50)
+		if (!v) {
+			adding = false
+			return
+		}
+		if (!labels) {
+			labels = []
+		}
+		if (!labels.includes(v)) {
+			labels = [...labels, v]
+			onchange?.()
+		}
+		inputValue = ''
+		adding = false
+	}
+
+	function removeLabel(label: string) {
+		if (labels) {
+			labels = labels.filter((l) => l !== label)
+			onchange?.()
+		}
+	}
+
+	function onKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault()
+			if (selectedIdx >= 0 && selectedIdx < suggestions.length) {
+				addLabel(suggestions[selectedIdx])
+			} else {
+				addLabel() // either "Create new" selected or free text
+			}
+		} else if (e.key === 'Escape') {
+			// Escape cancels the label, and nothing else. Left to bubble it also reaches
+			// whatever encloses us — a drawer or dialog closes on it, and one guarding on
+			// unsaved changes reads `pending` before this clears it, so it prompts to
+			// discard work this key just discarded.
+			e.preventDefault()
+			e.stopPropagation()
+			inputValue = ''
+			adding = false
+			onPendingChange?.('')
+		} else if (e.key === 'ArrowDown') {
+			e.preventDefault()
+			const maxIdx = suggestions.length + (showCreateNew ? 1 : 0) - 1
+			selectedIdx = Math.min(selectedIdx + 1, maxIdx)
+		} else if (e.key === 'ArrowUp') {
+			e.preventDefault()
+			selectedIdx = Math.max(selectedIdx - 1, -1)
+		}
+	}
+
+	function onBlur() {
+		// Delay to allow click on suggestion
+		setTimeout(() => {
+			if (adding) addLabel()
+		}, 150)
+	}
+
+	/** Add whatever is typed but not yet committed, right now. Blur commits on a 150ms
+	 *  grace period, so a caller that reads `labels` in the same tick as the blur — a Save
+	 *  button, which blurs this input by being clicked — would miss the last label.
+	 *  `adding` is cleared here, so the pending timer then finds nothing to do. */
+	export function flushPendingLabel(): void {
+		if (adding) addLabel()
+	}
+</script>
+
+<div class="inline-flex items-center gap-1 ml-0.5 h-5 {clazz}">
+	{#each labels ?? [] as label (label)}
+		<Badge color="blue" small>
+			{label}
+			<button class="ml-0.5 hover:text-red-500" onclick={() => removeLabel(label)}>
+				<X size={10} />
+			</button>
+		</Badge>
+	{/each}
+	{#if adding}
+		<div class="relative">
+			<input
+				bind:this={inputEl}
+				bind:value={inputValue}
+				onkeydown={onKeydown}
+				onblur={onBlur}
+				class="text-2xs border border-blue-300 rounded px-1.5 py-0 h-5 max-w-32 outline-none focus:ring-1 focus:ring-blue-400"
+				placeholder="label"
+			/>
+			{#if suggestions.length > 0 || showCreateNew}
+				<div
+					class="absolute top-6 left-0 z-50 bg-surface border border-light rounded shadow-md max-h-32 overflow-y-auto min-w-32"
+				>
+					{#each suggestions as suggestion, i}
+						<button
+							class="w-full text-left text-2xs px-2 py-1 hover:bg-surface-hover {i === selectedIdx
+								? 'bg-surface-hover'
+								: ''}"
+							onmousedown={(e) => {
+								e.preventDefault()
+								addLabel(suggestion)
+							}}
+						>
+							{suggestion}
+						</button>
+					{/each}
+					{#if showCreateNew}
+						<button
+							class="w-full text-left text-2xs px-2 py-1 hover:bg-surface-hover text-blue-600 {selectedIdx ===
+							suggestions.length
+								? 'bg-surface-hover'
+								: ''}"
+							onmousedown={(e) => {
+								e.preventDefault()
+								addLabel()
+							}}
+						>
+							+ Create "{trimmedInput}"
+						</button>
+					{/if}
+				</div>
+			{/if}
+		</div>
+	{:else}
+		<Button
+			variant="subtle"
+			unifiedSize="xs"
+			startIcon={{ icon: Tag }}
+			endIcon={{ icon: Plus, props: { size: 8 } }}
+			btnClasses="!gap-0.5"
+			aria-label="Add label"
+			onclick={startAdding}
+		/>
+	{/if}
+</div>

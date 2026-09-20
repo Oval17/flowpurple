@@ -1,0 +1,404 @@
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { stringify as yamlStringify } from "yaml";
+
+import { Command } from "@cliffy/command";
+import { Table } from "@cliffy/table";
+import { colors } from "@cliffy/ansi/colors";
+import * as log from "../../core/log.ts";
+import { sep as SEP, resolve as pathResolve } from "node:path";
+import { requireLogin } from "../../core/auth.ts";
+import { resolveWorkspace, validatePath } from "../../core/context.ts";
+import {
+  mergeConfigWithConfigFile,
+  readEffectiveSyncBehavior,
+} from "../../core/conf.ts";
+import * as wmill from "../../../gen/services.gen.ts";
+import type { PermissionedAsContext } from "../../core/permissioned_as.ts";
+import {
+  buildPermissionedAsContext,
+  lookupUsernameByEmail,
+} from "../../core/permissioned_as.ts";
+
+import {
+  GlobalOptions,
+  isSuperset,
+  parseFromFile,
+  removeType,
+} from "../../types.ts";
+import { Schedule } from "../../../gen/types.gen.ts";
+
+export interface ScheduleFile {
+  schedule: string;
+  on_failure: string;
+  script_path: string;
+  args: any;
+  timezone: string;
+  is_flow: boolean;
+  enabled: boolean;
+}
+
+async function list(opts: GlobalOptions & { json?: boolean }) {
+  if (opts.json) log.setSilent(true);
+  const workspace = await resolveWorkspace(opts);
+  await requireLogin(opts);
+
+  const schedules = await wmill.listSchedules({
+    workspace: workspace.workspaceId,
+  });
+
+  if (opts.json) {
+    console.log(JSON.stringify(schedules));
+  } else {
+    new Table()
+      .header(["Path", "Schedule"])
+      .padding(2)
+      .border(true)
+      .body(schedules.map((x) => [x.path, x.schedule]))
+      .render();
+  }
+}
+
+async function newSchedule(opts: GlobalOptions, path: string) {
+  if (!validatePath(path)) {
+    return;
+  }
+  const filePath = path + ".schedule.yaml";
+  try {
+    await stat(filePath);
+    throw new Error("File already exists: " + filePath);
+  } catch (e: any) {
+    if (e.message?.startsWith("File already exists")) throw e;
+  }
+  const template: ScheduleFile = {
+    schedule: "0 0 */6 * * *",
+    on_failure: "",
+    script_path: "",
+    args: {},
+    timezone: "Etc/UTC",
+    is_flow: false,
+    enabled: false,
+  };
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, yamlStringify(template as Record<string, any>), {
+    flag: "wx",
+    encoding: "utf-8",
+  });
+  log.info(colors.green(`Created ${filePath}`));
+}
+
+async function get(opts: GlobalOptions & { json?: boolean }, path: string) {
+  if (opts.json) log.setSilent(true);
+  const workspace = await resolveWorkspace(opts);
+  await requireLogin(opts);
+  const s = await wmill.getSchedule({
+    workspace: workspace.workspaceId,
+    path,
+  });
+  if (opts.json) {
+    console.log(JSON.stringify(s));
+  } else {
+    console.log(colors.bold("Path:") + " " + s.path);
+    console.log(colors.bold("Schedule:") + " " + s.schedule);
+    console.log(colors.bold("Timezone:") + " " + (s.timezone ?? ""));
+    console.log(colors.bold("Script Path:") + " " + (s.script_path ?? ""));
+    console.log(colors.bold("Is Flow:") + " " + (s.is_flow ? "true" : "false"));
+    console.log(colors.bold("Enabled:") + " " + (s.enabled ? "true" : "false"));
+  }
+}
+
+export async function pushSchedule(
+  workspace: string,
+  path: string,
+  schedule: Schedule | ScheduleFile | undefined,
+  localSchedule: ScheduleFile,
+  permissionedAsContext?: PermissionedAsContext,
+  enabledOwnedByParent?: boolean
+): Promise<void> {
+  path = removeType(path, "schedule").replaceAll(SEP, "/");
+  log.debug(`Processing local schedule ${path}`);
+
+  // deleting old app if it exists in raw mode
+  try {
+    schedule = await wmill.getSchedule({ workspace, path });
+    log.debug(`Schedule ${path} exists on remote`);
+  } catch {
+    log.debug(`Schedule ${path} does not exist on remote`);
+    //ignore
+  }
+
+  // Strip CLI-only boolean marker before sending to API
+  delete (localSchedule as any).has_permissioned_as;
+
+  // In a fork, the file's `enabled` is the parent's for a path the parent
+  // also has (see sync push's `parentOwnedScheduleEnabled`): the fork's own
+  // flag stays as it is.
+  if (enabledOwnedByParent && schedule) {
+    if (
+      localSchedule.enabled !== undefined &&
+      localSchedule.enabled !== schedule.enabled
+    ) {
+      log.warnAlways(
+        `Schedule ${path} stays ${schedule.enabled ? "enabled" : "disabled"}: the file says ${localSchedule.enabled ? "enabled" : "disabled"}, but in a fork that flag is the parent workspace's`
+      );
+    }
+    delete localSchedule.enabled;
+  }
+
+  const preserveFields: { permissioned_as?: string; preserve_permissioned_as?: boolean } = {};
+  if (permissionedAsContext?.userIsAdminOrDeployer) {
+    if (schedule) {
+      preserveFields.preserve_permissioned_as = true;
+      if ((schedule as Schedule).permissioned_as) {
+        preserveFields.permissioned_as = (schedule as Schedule).permissioned_as;
+        log.info(`Preserving ${(schedule as Schedule).permissioned_as} as permissioned_as for schedule ${path}`);
+      }
+    }
+    // On create: no client-side rule resolution needed — the backend applies folder defaults
+  }
+
+  if (schedule) {
+    if (isSuperset(localSchedule, schedule)) {
+      log.debug(`Schedule ${path} is up to date`);
+      return;
+    }
+    log.debug(`Updating schedule ${path}`);
+    try {
+      log.info(colors.bold.yellow(
+        `Updating schedule ${path}`
+      ));
+      await wmill.updateSchedule({
+        workspace: workspace,
+        path,
+        requestBody: {
+          ...localSchedule,
+          ...preserveFields,
+        },
+      });
+      // No `enabled` in the file (absent from the YAML, or set aside above)
+      // leaves the remote flag alone: `SetEnabled.enabled` is required, so
+      // `{ enabled: undefined }` would be rejected rather than ignored.
+      if (
+        localSchedule.enabled !== undefined &&
+        localSchedule.enabled !== schedule.enabled
+      ) {
+        log.info(colors.bold.yellow(
+          `Schedule ${path} is ${localSchedule.enabled ? "enabled" : "disabled"} locally but not on remote, updating remote`
+        ));
+        await setEnabledUnlessParentOwned(
+          workspace,
+          path,
+          localSchedule.enabled,
+          schedule.enabled
+        );
+      }
+    } catch (e) {
+      console.error((e as any).body);
+      throw e;
+    }
+  } else {
+    console.log(colors.bold.yellow("Creating new schedule " + path));
+    try {
+      await wmill.createSchedule({
+        workspace: workspace,
+        requestBody: {
+          path: path,
+          ...localSchedule,
+          ...preserveFields,
+        },
+      });
+    } catch (e) {
+      console.error((e as any).body);
+      throw e;
+    }
+    // A create in a fork lands disabled whatever the request says. A fork-only
+    // path the file wants enabled is enabled here, so one push converges; a
+    // parent-owned one stays disabled.
+    if (enabledOwnedByParent !== undefined && localSchedule.enabled === true) {
+      if (enabledOwnedByParent) {
+        log.warnAlways(
+          `Schedule ${path} created disabled: the file says enabled, but in a fork that flag is the parent workspace's`
+        );
+      } else {
+        await setEnabledUnlessParentOwned(workspace, path, true, false);
+      }
+    }
+  }
+}
+
+// The parent listing behind `enabledOwnedByParent` sees only what the pusher
+// may read; the backend's `fork-conflict` refusal is the last word, so a path
+// it says the parent has keeps the fork's flag rather than failing the push.
+async function setEnabledUnlessParentOwned(
+  workspace: string,
+  path: string,
+  enabled: boolean,
+  remoteEnabled: boolean
+): Promise<void> {
+  try {
+    await wmill.setScheduleEnabled({
+      workspace,
+      path,
+      requestBody: { enabled },
+    });
+  } catch (e) {
+    const conflict = parseForkConflict(e);
+    if (!conflict) {
+      throw e;
+    }
+    log.warnAlways(
+      `Schedule ${path} left ${remoteEnabled ? "enabled" : "disabled"}: the parent workspace '${conflict.parentWorkspaceId}' has the same schedule, so its flag is the parent's to set`
+    );
+  }
+}
+
+async function enable(opts: GlobalOptions & { force?: boolean }, path: string) {
+  opts = await mergeConfigWithConfigFile(opts);
+  const workspace = await resolveWorkspace(opts);
+  await requireLogin(opts);
+
+  try {
+    await wmill.setScheduleEnabled({
+      workspace: workspace.workspaceId,
+      path,
+      requestBody: { enabled: true, force: opts.force },
+    });
+  } catch (e) {
+    const conflict = parseForkConflict(e);
+    if (conflict) {
+      log.error(
+        `Cannot enable schedule '${path}': the parent workspace '${conflict.parentWorkspaceId}' has the same path configured. ` +
+          `Both crons would fire on every tick and the script would run twice per scheduled time.\n` +
+          `Re-run with --force to enable anyway.`
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
+
+  log.info(colors.green(`Schedule ${path} enabled.`));
+}
+
+/** Parse a backend error body of the shape `fork-conflict:<kind>:<parent_workspace_id>`. */
+function parseForkConflict(
+  e: unknown
+): { kind: string; parentWorkspaceId: string } | undefined {
+  const body = (e as any)?.body;
+  const raw = typeof body === "string" ? body : (e as any)?.message ?? "";
+  const m = String(raw).match(/fork-conflict:([^:]+):(.+)/);
+  if (!m) return undefined;
+  return { kind: m[1], parentWorkspaceId: m[2].trim() };
+}
+
+async function disable(opts: GlobalOptions, path: string) {
+  opts = await mergeConfigWithConfigFile(opts);
+  const workspace = await resolveWorkspace(opts);
+  await requireLogin(opts);
+
+  await wmill.setScheduleEnabled({
+    workspace: workspace.workspaceId,
+    path,
+    requestBody: { enabled: false },
+  });
+
+  log.info(colors.yellow(`Schedule ${path} disabled.`));
+}
+
+async function push(opts: GlobalOptions, filePath: string, remotePath: string) {
+  // Reading the config moves the cwd to the wmill.yaml root when it sits in a
+  // parent directory, so pin the file against the invocation cwd first.
+  filePath = pathResolve(filePath);
+  const workspace = await resolveWorkspace(opts);
+  await requireLogin(opts);
+  const syncBehavior = await readEffectiveSyncBehavior(opts, workspace);
+
+  if (!validatePath(remotePath)) {
+    return;
+  }
+
+  const fstat = await stat(filePath);
+  if (!fstat.isFile()) {
+    throw new Error("file path must refer to a file.");
+  }
+
+  console.log(colors.bold.yellow("Pushing schedule..."));
+
+  await pushSchedule(
+    workspace.workspaceId,
+    remotePath,
+    undefined,
+    parseFromFile(filePath),
+    await buildPermissionedAsContext(workspace.workspaceId, syncBehavior)
+  );
+  console.log(colors.bold.underline.green("Schedule pushed"));
+}
+
+const command = new Command()
+  .description("schedule related commands")
+  .option("--json", "Output as JSON (for piping to jq)")
+  .action(list as any)
+  .command("list", "list all schedules")
+  .option("--json", "Output as JSON (for piping to jq)")
+  .action(list as any)
+  .command("get", "get a schedule's details")
+  .arguments("<path:string>")
+  .option("--json", "Output as JSON (for piping to jq)")
+  .action(get as any)
+  .command("new", "create a new schedule locally")
+  .arguments("<path:string>")
+  .action(newSchedule as any)
+  .command(
+    "push",
+    "push a local schedule spec. This overrides any remote versions."
+  )
+  .arguments("<file_path:string> <remote_path:string>")
+  .action(push as any)
+  .command("enable", "Enable a schedule")
+  .option(
+    "--force",
+    "Bypass the fork-conflict warning when the parent workspace has the same schedule (acknowledges that both crons will fire)"
+  )
+  .arguments("<path:string>")
+  .action(enable as any)
+  .command("disable", "Disable a schedule")
+  .arguments("<path:string>")
+  .action(disable as any)
+  .command(
+    "set-permissioned-as",
+    "Set the email (run-as user) for a schedule (requires admin or wm_deployers group)"
+  )
+  .arguments("<path:string> <email:string>")
+  .action((async (opts: any, schedulePath: string, email: string) => {
+    const workspace = await resolveWorkspace(opts);
+    await requireLogin(opts);
+
+    const cache = new Map<string, { username: string; email: string }>();
+    const username = await lookupUsernameByEmail(
+      workspace.workspaceId,
+      email,
+      cache,
+    );
+
+    const remote = await wmill.getSchedule({
+      workspace: workspace.workspaceId,
+      path: schedulePath,
+    });
+    if (!remote) throw new Error(`Schedule ${schedulePath} not found`);
+
+    await wmill.updateSchedule({
+      workspace: workspace.workspaceId,
+      path: schedulePath,
+      requestBody: {
+        ...(remote as any),
+        permissioned_as: `u/${username}`,
+        preserve_permissioned_as: true,
+      } as any,
+    });
+    log.info(
+      colors.green(
+        `Updated permissioned_as for schedule ${schedulePath} to ${email} (username: ${username})`
+      )
+    );
+  }) as any);
+
+export default command;

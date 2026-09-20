@@ -1,0 +1,2402 @@
+#[cfg(feature = "otel")]
+use opentelemetry::trace::FutureExt;
+
+use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU16, Ordering},
+        Arc,
+    },
+};
+use tracing::{field, Instrument};
+#[cfg(not(feature = "otel"))]
+use windmill_common::otel_oss::FutureExt;
+
+use uuid::Uuid;
+
+use windmill_common::{
+    add_time,
+    error::{self, Error},
+    flow_status::FlowJobDuration,
+    jobs::JobKind,
+    utils::WarnAfterExt,
+    worker::{error_to_value, to_raw_value, Connection, WORKER_GROUP},
+    worker_group_job_stats::{accumulate_job_stats, flush_stats_to_db, JobStatsMap},
+    KillpillSender, DB,
+};
+
+#[cfg(feature = "benchmark")]
+use windmill_common::bench::{BenchmarkInfo, BenchmarkIter};
+
+use windmill_queue::{
+    append_logs, asset_dispatch, get_mini_completed_job, is_pre_shaped_wm_failure_result,
+    parse_result_object, CanceledBy, FlowRunners, JobCompleted, MiniCompletedJob, MiniPulledJob,
+    ValidableJson, WrappedError, INIT_SCRIPT_TAG, MANUAL_FAILURE_ERROR_NAME,
+};
+
+use serde_json::{json, value::RawValue, Value};
+
+use tokio::{sync::Notify, task::JoinHandle};
+
+use windmill_queue::{add_completed_job, add_completed_job_error};
+
+use crate::{
+    bash_executor::ANSI_ESCAPE_RE,
+    common::{read_result, save_in_cache},
+    otel_oss::add_root_flow_job_to_otlp,
+    worker_flow::update_flow_status_after_job_completion,
+    JobCompletedReceiver, JobCompletedSender, SameWorkerSender, SendResult, SendResultPayload,
+    StepFailureKind, UpdateFlow, SAME_WORKER_REQUIREMENTS,
+};
+use windmill_common::client::AuthedClient;
+
+#[derive(Debug, Deserialize)]
+struct ErrorMessage {
+    message: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NestedErrorMessage {
+    error: ErrorMessage,
+}
+
+/// Extract `{ name, message }` from a result. Accepts both the standard
+/// top-level shape (regular runtime errors) and the nested `{ error: { name,
+/// message }, ... }` shape produced by the wm_failure injection.
+///
+/// For wm_failure-injected results, we prefer the nested error: a successful
+/// run may legitimately contain top-level `name`/`message` fields (user data
+/// named `name`/`message`), and we want OTel to record the ManualFailure
+/// rather than the user's sibling fields.
+fn extract_error_message(raw: &str) -> Option<ErrorMessage> {
+    let nested = parse_result_object::<NestedErrorMessage>(raw).map(|n| n.error);
+    if matches!(&nested, Some(em) if em.name == MANUAL_FAILURE_ERROR_NAME) {
+        return nested;
+    }
+    if let Some(em) = parse_result_object::<ErrorMessage>(raw) {
+        return Some(em);
+    }
+    nested
+}
+
+/// Returns the post-processing `success` value (after any `wm_failure`
+/// override). Callers use this to make worker-loop decisions that depend on
+/// whether the job ultimately succeeded — e.g. the init-script killpill.
+async fn process_jc(
+    mut jc: JobCompleted,
+    worker_name: &str,
+    base_internal_url: &str,
+    db: &DB,
+    worker_dir: &str,
+    same_worker_tx: Option<&SameWorkerSender>,
+    job_completed_sender: &JobCompletedSender,
+    stats_map: &JobStatsMap,
+    killpill_rx: &tokio::sync::broadcast::Receiver<()>,
+    #[cfg(feature = "benchmark")] bench: &mut BenchmarkIter,
+    #[cfg(feature = "benchmark")] bench_infos: &mut BenchmarkInfo,
+) -> bool {
+    // Parse `wm_labels` and `wm_failure` together (single `from_str`)
+    // so we don't deserialize the whole result twice on every job.
+    let metadata = jc.result.result_metadata();
+
+    // If the script returned a `wm_failure: <string>` field in its
+    // result, tag the run as a failure. Inject an `error: { name, message }`
+    // at the top level so error handlers / UI / OTel see the standard error
+    // shape, while preserving sibling fields (`windmill_status_code`,
+    // `windmill_content_type`, `windmill_headers`, the user's data) at the
+    // top level so sync webhook responses still honor them.
+    if jc.success {
+        if let Some(failure_msg) = metadata.wm_failure.as_ref() {
+            if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(jc.result.get()) {
+                map.insert(
+                    "error".to_string(),
+                    json!({ "name": MANUAL_FAILURE_ERROR_NAME, "message": failure_msg }),
+                );
+                if let Ok(raw) = serde_json::value::to_raw_value(&Value::Object(map)) {
+                    jc.result = Arc::new(raw);
+                }
+            }
+            jc.success = false;
+        }
+    }
+
+    let success: bool = jc.success;
+
+    let span = if success {
+        tracing::span!(
+            tracing::Level::INFO,
+            "job_postprocessing",
+            job_id = %jc.job.id, root_job = field::Empty, workspace_id = %jc.job.workspace_id,  worker = %worker_name,tag = %jc.job.tag,
+            // hostname = %hostname,
+            language = field::Empty,
+            script_path = field::Empty,
+            flow_step_id = field::Empty,
+            parent_job = field::Empty,
+            job_kind = %jc.job.kind.as_str(),
+            created_by = %jc.job.created_by,
+            trigger_kind = field::Empty,
+            trigger = field::Empty,
+            script_hash = field::Empty,
+            otel.name = field::Empty,
+            success = %success,
+            labels = field::Empty,
+        )
+    } else {
+        tracing::span!(
+            tracing::Level::INFO,
+            "job_postprocessing",
+            job_id = %jc.job.id, root_job = field::Empty, workspace_id = %jc.job.workspace_id,  worker = %worker_name,tag = %jc.job.tag,
+            // hostname = %hostname,
+            language = field::Empty,
+            script_path = field::Empty,
+            flow_step_id = field::Empty,
+            parent_job = field::Empty,
+            job_kind = %jc.job.kind.as_str(),
+            created_by = %jc.job.created_by,
+            trigger_kind = field::Empty,
+            trigger = field::Empty,
+            script_hash = field::Empty,
+            otel.name = field::Empty,
+            otel.status_code = "ERROR",
+            otel.status_message = field::Empty,
+            success = %success,
+            error.message = field::Empty,
+            error.name = field::Empty,
+            labels = field::Empty,
+        )
+    };
+    let rj = if let Some(root_job) = jc.job.flow_innermost_root_job {
+        root_job
+    } else {
+        jc.job.id
+    };
+
+    if let Some(labels) = metadata.wm_labels.as_ref() {
+        if !labels.is_empty() {
+            span.record("labels", labels.join(","));
+        }
+    }
+    // The secondary `job_postprocessing` span stays on the UUID-derived context
+    // (MiniCompletedJob carries no args, so the inbound traceparent isn't
+    // available here); the primary job span is relocated in `create_span_with_name`.
+    windmill_common::otel_oss::set_span_parent(&span, &rj);
+
+    if let Some(lg) = jc.job.script_lang.as_ref() {
+        span.record("language", lg.as_str());
+    }
+    if let Some(step_id) = jc.job.flow_step_id.as_ref() {
+        span.record(
+            "otel.name",
+            format!("job_postprocessing {}", step_id).as_str(),
+        );
+        span.record("flow_step_id", step_id.as_str());
+    } else {
+        span.record("otel.name", "job postprocessing");
+    }
+    if let Some(parent_job) = jc.job.parent_job.as_ref() {
+        span.record("parent_job", parent_job.to_string().as_str());
+    }
+    if let Some(script_path) = jc.job.runnable_path.as_ref() {
+        span.record("script_path", script_path.as_str());
+    }
+    if let Some(root_job) = jc.job.flow_innermost_root_job.as_ref() {
+        span.record("root_job", root_job.to_string().as_str());
+    }
+    if let Some(trigger_kind) = jc.job.trigger_kind.as_ref() {
+        span.record("trigger_kind", trigger_kind.as_str());
+    }
+    if let Some(trigger) = jc.job.trigger.as_ref() {
+        span.record("trigger", trigger.as_str());
+    }
+    if let Some(script_hash) = jc.job.runnable_id.as_ref() {
+        span.record("script_hash", script_hash.to_string().as_str());
+    }
+    if !success {
+        if let Some(result_error) = extract_error_message(jc.result.get()) {
+            span.record("error.message", result_error.message.as_str());
+            span.record("error.name", result_error.name.as_str());
+            span.record(
+                "otel.status_message",
+                crate::worker::truncate_description(&result_error.message).as_str(),
+            );
+        } else {
+            span.record("otel.status_message", "Job failed");
+        }
+    }
+
+    // Extract stats info before moving jc
+    let duration_ms = jc.duration.clone();
+    let script_lang = jc.job.script_lang.clone();
+    let workspace_id = jc.job.workspace_id.clone();
+
+    let root_job = handle_receive_completed_job(
+        jc,
+        &base_internal_url,
+        &db,
+        worker_dir,
+        same_worker_tx,
+        &worker_name,
+        job_completed_sender.clone(),
+        killpill_rx,
+        #[cfg(feature = "benchmark")]
+        bench,
+    )
+    .instrument(span)
+    .warn_after_seconds(10)
+    .await;
+
+    if let Some(root_job) = root_job {
+        add_root_flow_job_to_otlp(&root_job, success);
+
+        #[cfg(feature = "benchmark")]
+        if bench_infos.count_top_level(root_job.id) {
+            bench_infos
+                .shared_iters
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // Accumulate job stats if duration is available
+    if let Some(duration_ms) = duration_ms {
+        accumulate_job_stats(
+            stats_map,
+            &*WORKER_GROUP,
+            script_lang,
+            &workspace_id,
+            duration_ms,
+        )
+        .await;
+    }
+
+    success
+}
+
+enum JobCompletedRx {
+    JobCompleted(SendResult),
+    Killpill,
+    WakeUp,
+}
+
+pub fn start_background_processor(
+    job_completed_rx: JobCompletedReceiver,
+    job_completed_sender: JobCompletedSender,
+    same_worker_queue_size: Arc<AtomicU16>,
+    job_completed_processor_is_done: Arc<AtomicBool>,
+    wake_up_notify: Arc<Notify>,
+    last_processing_duration: Arc<AtomicU16>,
+    base_internal_url: String,
+    db: DB,
+    worker_dir: String,
+    same_worker_tx: SameWorkerSender,
+    worker_name: String,
+    killpill_tx: KillpillSender,
+    is_dedicated_worker: bool,
+    // True when this processor runs inside the agent-worker API server, relaying
+    // completions on behalf of many remote agent workers. Such a processor must
+    // never kill itself: dropping its receiver would disconnect the shared
+    // job-completed channel and make every future /send_result fail until the
+    // whole server is restarted.
+    is_agent_server: bool,
+    stats_map: JobStatsMap,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut has_been_killed = false;
+
+        let JobCompletedReceiver { bounded_rx, mut killpill_rx, unbounded_rx } = job_completed_rx;
+
+        #[cfg(feature = "benchmark")]
+        let mut infos = BenchmarkInfo::new(windmill_common::bench::shared_bench_iters());
+
+        // Start periodic stats flush task
+        let db_clone = db.clone();
+        let stats_map_clone = stats_map.clone();
+        let mut killpill_rx_clone = killpill_rx.resubscribe();
+        let flush_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(900)); // Flush every 15 min
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = flush_stats_to_db(&db_clone, &stats_map_clone).await {
+                            tracing::error!("Failed to flush worker group job stats: {}", e);
+                        }
+                    }
+                    _ = killpill_rx_clone.recv() => {
+                        tracing::info!("bg processor received killpill signal, flushing remaining stats");
+                        break;
+                    }
+                }
+            }
+        });
+
+        //if we have been killed, we want to drain the queue of jobs
+        while let Some(sr) = {
+            if has_been_killed {
+                tracing::info!("bg processor is killed, draining. same_worker_queue_size: {}, unbounded_rx: {}, bounded_rx: {}", same_worker_queue_size.load(Ordering::SeqCst), unbounded_rx.len(), bounded_rx.len())
+            }
+            if has_been_killed && same_worker_queue_size.load(Ordering::SeqCst) == 0 {
+                unbounded_rx
+                    .try_recv()
+                    .ok()
+                    .map(JobCompletedRx::JobCompleted)
+                    .or_else(|| bounded_rx.try_recv().ok().map(JobCompletedRx::JobCompleted))
+            } else {
+                tokio::select! {
+                    biased;
+                    result = unbounded_rx.recv_async()  => {
+                        result.ok().map(JobCompletedRx::JobCompleted)
+                    }
+                    result = bounded_rx.recv_async() => {
+                        result.ok().map(JobCompletedRx::JobCompleted)
+                    },
+                    _ = wake_up_notify.notified() => {
+                        tracing::info!("bg processor received wake up signal, checking if same worker queue is empty");
+                        Some(JobCompletedRx::WakeUp)
+                    },
+                    _ = killpill_rx.recv() => {
+                        tracing::info!("bg processor received killpill signal, queuing killpill job");
+                        Some(JobCompletedRx::Killpill)
+                    }
+                }
+            }
+        } {
+            #[cfg(feature = "benchmark")]
+            let mut bench = BenchmarkIter::new();
+
+            match sr {
+                JobCompletedRx::JobCompleted(SendResult {
+                    result: SendResultPayload::JobCompleted(jc),
+                    time,
+                }) => {
+                    let is_init_script = jc.job.tag.as_str() == INIT_SCRIPT_TAG;
+                    // A binary build shares the `dependencies` kind but deploys no new
+                    // version, so it must not bounce the dedicated workers below — its tag
+                    // can point at a pool that hosts them.
+                    let is_dependency_job = matches!(
+                        jc.job.kind,
+                        JobKind::Dependencies | JobKind::FlowDependencies
+                    ) && !jc.job.build_binary_only;
+                    let jc_id = jc.job.id;
+                    #[cfg(feature = "benchmark")]
+                    let bench_job_id = jc.job.id;
+                    #[cfg(feature = "benchmark")]
+                    let is_top_level_job = jc.job.parent_job.is_none();
+
+                    // process_jc returns the post-override success value so a
+                    // job that flipped to failure via `wm_failure` still
+                    // triggers the init-script killpill.
+                    let final_success = process_jc(
+                        jc,
+                        &worker_name,
+                        &base_internal_url,
+                        &db,
+                        &worker_dir,
+                        Some(&same_worker_tx),
+                        &job_completed_sender,
+                        &stats_map,
+                        &killpill_rx,
+                        #[cfg(feature = "benchmark")]
+                        &mut bench,
+                        #[cfg(feature = "benchmark")]
+                        &mut infos,
+                    )
+                    .warn_after_seconds(10)
+                    .await;
+
+                    // Resolved here rather than from the main loop's outcome because `wm_failure`
+                    // can flip an exit-zero init script to a failure, and dedicated workers must
+                    // not install against a host it failed to prepare. An agent server relays other
+                    // workers' init scripts, so it has no say over its own gate.
+                    if is_init_script && !is_agent_server {
+                        crate::worker::init_script_finished(final_success);
+                    }
+
+                    if is_init_script && !final_success {
+                        if is_agent_server {
+                            // The failed init script belongs to a remote agent
+                            // worker, not to this server. That worker handles its
+                            // own restart; killing the server relay here would
+                            // strand every other agent worker's completions.
+                            tracing::error!(
+                                job_id = %jc_id,
+                                "agent worker init script errored; failure recorded, keeping server bg processor alive"
+                            );
+                        } else {
+                            tracing::error!("init script errored, exiting");
+                            killpill_tx.send();
+                            break;
+                        }
+                    }
+                    if is_dependency_job && is_dedicated_worker {
+                        tracing::error!("Dedicated worker executed a dependency job, a new script has been deployed. Exiting expecting to be restarted.");
+                        sqlx::query!(
+                                "UPDATE config SET config = config WHERE name = $1",
+                                format!("worker__{}", *WORKER_GROUP)
+                            )
+                            .execute(&db)
+                            .await
+                            .expect("update config to trigger restart of all dedicated workers at that config");
+                        killpill_tx.send();
+                    }
+                    add_time!(bench, "job completed processed");
+
+                    #[cfg(feature = "benchmark")]
+                    {
+                        if infos.add_iter(bench, bench_job_id, is_top_level_job) {
+                            infos.shared_iters.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    last_processing_duration
+                        .store(time.elapsed().as_secs() as u16, Ordering::SeqCst);
+                }
+                JobCompletedRx::JobCompleted(SendResult {
+                    result:
+                        SendResultPayload::UpdateFlow(UpdateFlow {
+                            flow,
+                            w_id,
+                            success,
+                            result,
+                            worker_dir,
+                            stop_early_override,
+                            token,
+                            step_failure,
+                        }),
+                    time,
+                }) => {
+                    // let r;
+                    tracing::info!(parent_flow = %flow, "updating flow status after job completion");
+                    if let Err(e) = update_flow_status_after_job_completion(
+                        &db,
+                        &AuthedClient::new(
+                            base_internal_url.to_string(),
+                            w_id.clone(),
+                            token.clone(),
+                            None,
+                        ),
+                        flow,
+                        &Uuid::nil(),
+                        &w_id,
+                        success,
+                        None,
+                        Arc::new(result),
+                        None,
+                        step_failure,
+                        &same_worker_tx,
+                        &worker_dir,
+                        stop_early_override,
+                        &worker_name,
+                        job_completed_sender.clone(),
+                        None,
+                        &killpill_rx,
+                        #[cfg(feature = "benchmark")]
+                        &mut bench,
+                    )
+                    .await
+                    {
+                        tracing::error!("Error updating flow status after job completion for {flow} on {worker_name}: {e:#}");
+                    }
+                    #[cfg(feature = "benchmark")]
+                    {
+                        if infos.add_iter(bench, flow, true) {
+                            infos.shared_iters.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    last_processing_duration
+                        .store(time.elapsed().as_secs() as u16, Ordering::SeqCst);
+                }
+                JobCompletedRx::Killpill => {
+                    tracing::info!("killpill job received, processing only same worker jobs");
+                    has_been_killed = true;
+                }
+                JobCompletedRx::WakeUp => {}
+            }
+        }
+
+        // Flush any remaining stats before shutting down
+        tracing::info!("flushing remaining stats before shutting down");
+        let flush_result =
+            tokio::time::timeout(std::time::Duration::from_secs(10), flush_handle).await;
+        match flush_result {
+            Ok(Ok(())) => tracing::info!("Stats flushed successfully"),
+            Ok(Err(join_err)) => tracing::error!("Stats flush task failed: {}", join_err),
+            Err(_) => tracing::error!("Stats flush timed out after 10 seconds"),
+        }
+
+        job_completed_processor_is_done.store(true, Ordering::SeqCst);
+
+        tracing::info!("finished processing all completed jobs");
+
+        #[cfg(feature = "benchmark")]
+        {
+            infos
+                .write_to_file("profiling_result_processor.json")
+                .expect("write to file profiling");
+        }
+    })
+}
+
+async fn send_job_completed(job_completed_tx: JobCompletedSender, jc: JobCompleted) {
+    if let Err(e) = job_completed_tx
+        .send_job(jc, true)
+        .with_context(windmill_common::otel_oss::otel_ctx())
+        .await
+    {
+        tracing::error!("send job completed failed, triggering worker shutdown: {e:#}");
+        job_completed_tx.send_worker_killpill();
+    }
+}
+
+pub async fn process_result(
+    job: MiniCompletedJob,
+    result: error::Result<Arc<Box<RawValue>>>,
+    job_dir: &str,
+    job_completed_tx: JobCompletedSender,
+    mem_peak: i32,
+    canceled_by: Option<CanceledBy>,
+    cached_res_path: Option<String>,
+    token: &str,
+    result_columns: Option<Vec<String>>,
+    preprocessed_args: Option<HashMap<String, Box<RawValue>>>,
+    conn: &Connection,
+    duration: Option<i64>,
+    has_stream: bool,
+    flow_runners: Option<Arc<FlowRunners>>,
+) -> error::Result<crate::worker::JobOutcome> {
+    match result {
+        Ok(result) => {
+            send_job_completed(
+                job_completed_tx,
+                JobCompleted {
+                    job,
+                    preprocessed_args,
+                    result,
+                    result_columns,
+                    mem_peak,
+                    canceled_by,
+                    success: true,
+                    cached_res_path,
+                    token: token.to_string(),
+                    duration,
+                    has_stream: Some(has_stream),
+                    from_cache: None,
+                    flow_runners,
+                    done_tx: None,
+                },
+            )
+            .with_context(windmill_common::otel_oss::otel_ctx())
+            .await;
+            Ok(crate::worker::JobOutcome::Completed)
+        }
+        Err(e) => {
+            let error_value = match e {
+                Error::ExitStatus(program, i) => {
+                    let res = read_result(job_dir, None).await.ok();
+
+                    if res.as_ref().is_some_and(|x| !x.get().is_empty()) {
+                        res.unwrap()
+                    } else {
+                        match conn {
+                            Connection::Sql(db) => {
+                                let last_10_log_lines = sqlx::query_scalar!(
+                            "SELECT right(logs, 600) FROM job_logs WHERE job_id = $1 AND workspace_id = $2 ORDER BY created_at DESC LIMIT 1",
+                            &job.id,
+                            &job.workspace_id
+                        ).fetch_one(db).await.ok().flatten().unwrap_or("".to_string());
+
+                                let log_lines = last_10_log_lines
+                                    .split("CODE EXECUTION ---")
+                                    .last()
+                                    .unwrap_or(&last_10_log_lines);
+
+                                extract_error_value(
+                                    &program,
+                                    log_lines,
+                                    i,
+                                    job.flow_step_id.clone(),
+                                )
+                            }
+                            Connection::Http(_) => {
+                                to_raw_value(&"See logs for more details".to_string())
+                            }
+                        }
+                    }
+                }
+                Error::ExecutionRawError(e) => to_raw_value(&e),
+                err @ _ => to_raw_value(&SerializedError {
+                    message: format!("execution error:\n{err:#}",),
+                    name: "ExecutionErr".to_string(),
+                    step_id: job.flow_step_id.clone(),
+                    exit_code: None,
+                }),
+            };
+
+            // Use the structured error message that was just extracted (the
+            // user-facing script error) rather than the generic Error string.
+            // Pull `.message` out of the JSON object if present, otherwise
+            // accept a bare string (e.g. agent-worker "See logs for more
+            // details"), and only fall back to "Job failed" when the value
+            // carries no readable description.
+            let description = serde_json::from_str::<serde_json::Value>(error_value.get())
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .or_else(|| value.as_str())
+                        .map(|m| crate::worker::truncate_description(m))
+                })
+                .unwrap_or_else(|| "Job failed".to_string());
+
+            send_job_completed(
+                job_completed_tx,
+                JobCompleted {
+                    job,
+                    result: Arc::new(to_raw_value(&error_value)),
+                    result_columns: None,
+                    preprocessed_args: None,
+                    mem_peak,
+                    canceled_by,
+                    success: false,
+                    cached_res_path,
+                    token: token.to_string(),
+                    duration,
+                    has_stream: Some(has_stream),
+                    from_cache: None,
+                    flow_runners,
+                    done_tx: None,
+                },
+            )
+            .with_context(windmill_common::otel_oss::otel_ctx())
+            .await;
+            Ok(crate::worker::JobOutcome::Failed { description })
+        }
+    }
+}
+
+pub async fn handle_receive_completed_job(
+    jc: JobCompleted,
+    base_internal_url: &str,
+    db: &DB,
+    worker_dir: &str,
+    same_worker_tx: Option<&SameWorkerSender>,
+    worker_name: &str,
+    job_completed_tx: JobCompletedSender,
+    killpill_rx: &tokio::sync::broadcast::Receiver<()>,
+    #[cfg(feature = "benchmark")] bench: &mut BenchmarkIter,
+) -> Option<Arc<MiniPulledJob>> {
+    let workspace = jc.job.workspace_id.clone();
+    // This client drives post-completion orchestration (the next step's input transforms fetch
+    // prior results) and outlives the finished step, so the step's own token can already be near
+    // expiry. Refresh it — but only from the server-written job_perms row, never from the
+    // completion payload's owner fields, which are untrusted on the agent-worker path.
+    let token = if jc.job.is_flow_step()
+        && windmill_common::auth::job_token_remaining_lifetime_secs(&jc.token)
+            .is_some_and(|r| r < windmill_common::auth::JOB_TOKEN_REFRESH_MARGIN_SECS)
+    {
+        let label = windmill_common::auth::ephemeral_script_token_label(
+            &jc.job.permissioned_as,
+            &jc.job.created_by,
+        );
+        match windmill_common::auth::get_job_perms(db, &jc.job.id, &jc.job.workspace_id).await {
+            Ok(Some(perms)) => windmill_common::auth::create_token_for_owner(
+                db,
+                &jc.job.workspace_id,
+                &jc.job.permissioned_as,
+                &label,
+                windmill_common::auth::job_token_expiry_secs(db, &jc.job.workspace_id).await,
+                &jc.job.permissioned_as_email,
+                &jc.job.id,
+                Some(perms),
+                Some(format!(
+                    "job-span-{}",
+                    jc.job.flow_innermost_root_job.unwrap_or(jc.job.id)
+                )),
+            )
+            .warn_after_seconds(5)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "could not mint fresh flow-orchestration token for job {}, reusing step token: {e:#}",
+                    jc.job.id
+                );
+                jc.token.clone()
+            }),
+            // No perms row (e.g. a zombie replay after the queue row was reaped): keep the step
+            // token rather than minting an identity from untrusted payload fields. The token is
+            // near expiry, so trace it — the downstream fetch may hit the original failure.
+            Ok(None) => {
+                tracing::warn!(
+                    "no job_perms row to refresh flow-orchestration token for job {}, reusing step token",
+                    jc.job.id
+                );
+                jc.token.clone()
+            }
+            // A transient DB error must not silently reuse the near-expired token without a trace,
+            // or the very failure this guards against recurs invisibly.
+            Err(e) => {
+                tracing::warn!(
+                    "could not load job_perms to refresh flow-orchestration token for job {}, reusing step token: {e:#}",
+                    jc.job.id
+                );
+                jc.token.clone()
+            }
+        }
+    } else {
+        jc.token.clone()
+    };
+    let client = AuthedClient::new(base_internal_url.to_string(), workspace, token, None);
+    let job = jc.job.clone();
+    let mem_peak = jc.mem_peak.clone();
+    let canceled_by = jc.canceled_by.clone();
+
+    let processed_completed_job = process_completed_job(
+        jc,
+        &client,
+        db,
+        &worker_dir,
+        same_worker_tx.clone(),
+        worker_name,
+        job_completed_tx.clone(),
+        killpill_rx,
+        #[cfg(feature = "benchmark")]
+        bench,
+    )
+    .warn_after_seconds(10)
+    .await;
+
+    match processed_completed_job {
+        // The job was already completed by another worker (e.g. this worker was
+        // declared a zombie and the job restarted+finished elsewhere, then this
+        // worker caught up). The job genuinely succeeded; routing this through
+        // `handle_job_error` would propagate a spurious "AlreadyCompleted"
+        // failure up the parent flow. Drop it instead, mirroring the
+        // `JobOutcome::AlreadyCompleted` guard on the execution path.
+        Err(err @ Error::AlreadyCompleted(_)) => {
+            tracing::info!(
+                job_id = %job.id,
+                "job already completed by another worker, skipping result processing: {err:#}"
+            );
+            None
+        }
+        Err(err) => {
+            handle_job_error(
+                db,
+                &client,
+                &job,
+                mem_peak,
+                canceled_by,
+                err,
+                StepFailureKind::Normal,
+                same_worker_tx.clone(),
+                &worker_dir,
+                worker_name,
+                job_completed_tx,
+                killpill_rx,
+                #[cfg(feature = "benchmark")]
+                bench,
+            )
+            .await;
+            None
+        }
+        Ok(r) => r,
+    }
+}
+
+/// A git-sync check run threaded through a pull job: the PR diff preview (phase 4)
+/// or the live deploy status (phase 6). Both markers carry the same shape.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+#[derive(serde::Deserialize)]
+struct GitSyncCheck {
+    /// Absent when the repository's host has no check surface (GitLab): the
+    /// result then reaches the pull request through the managed comment alone.
+    #[serde(default)]
+    check_run_id: Option<i64>,
+    /// Only markers written before the repository URL moved out of job args
+    /// carry one; the resource path on the job is what is used now.
+    #[serde(default)]
+    repo_url: Option<String>,
+    /// Host and path of the repository the check was created on, with no
+    /// credential in it. The resource path is mutable, so this is what proves
+    /// the resource still points where the check lives.
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    pr_number: Option<i64>,
+    #[serde(default)]
+    head_sha: Option<String>,
+    /// Whether the PR itself modifies wmill.yaml (None = undetermined); picks
+    /// the wording for a settings difference in the diff summary.
+    #[serde(default)]
+    wmill_yaml_changed: Option<bool>,
+}
+
+/// Parsed diff summary from a (dry-run or real) pull result. `None` when the
+/// result can't be parsed into the expected shape.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn parse_git_sync_changes(result_raw: &str) -> Option<(Vec<(String, String)>, bool)> {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct Change {
+        #[serde(rename = "type")]
+        change_type: String,
+        path: String,
+    }
+    #[derive(Deserialize)]
+    struct SettingsDiff {
+        #[serde(rename = "hasChanges", default)]
+        has_changes: bool,
+    }
+    #[derive(Deserialize)]
+    struct SyncResponse {
+        changes: Option<Vec<Change>>,
+        #[serde(rename = "settingsDiffResult")]
+        settings_diff_result: Option<SettingsDiff>,
+    }
+    let resp = serde_json::from_str::<SyncResponse>(result_raw).ok()?;
+    // A result carrying neither field isn't a recognizable diff; return None so the
+    // caller falls back to the unsummarized path instead of a false "in sync".
+    if resp.changes.is_none() && resp.settings_diff_result.is_none() {
+        return None;
+    }
+    let settings_changed = resp
+        .settings_diff_result
+        .map(|s| s.has_changes)
+        .unwrap_or(false);
+    Some((
+        resp.changes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.change_type, c.path))
+            .collect(),
+        settings_changed,
+    ))
+}
+
+/// The pull script reports an unmergeable PR as a top-level `pr_check_error`
+/// sentinel field. Matched as an exact field, never a substring: a successful
+/// diff lists user-controlled repo paths that could embed the sentinel text.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn parse_pr_check_error(result_raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(result_raw)
+        .ok()
+        .and_then(|v| {
+            v.get("pr_check_error")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+/// The run page for `job_id`, or `None` when the instance has no `BASE_URL` set
+/// (it defaults to empty) — a check must not carry a link that goes nowhere.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn job_run_url(base_url: &str, job_id: &uuid::Uuid, workspace_id: &str) -> Option<String> {
+    let base = base_url.trim_end_matches('/');
+    (!base.is_empty()).then(|| format!("{base}/run/{job_id}?workspace={workspace_id}"))
+}
+
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn format_change_list(changes: &[(String, String)]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (change_type, path) in changes.iter().take(100) {
+        lines.push(format!("- `{}` {}", change_type, path));
+    }
+    if changes.len() > 100 {
+        lines.push(format!("- ... and {} more", changes.len() - 100));
+    }
+    lines
+}
+
+#[cfg(all(test, feature = "enterprise", feature = "private"))]
+mod git_sync_check_tests {
+    use super::{format_change_list, job_run_url, parse_git_sync_changes, parse_pr_check_error};
+
+    #[test]
+    fn job_run_url_is_none_without_a_base_url() {
+        let id = uuid::Uuid::nil();
+        assert_eq!(
+            job_run_url("https://app.windmill.dev/", &id, "w").as_deref(),
+            Some("https://app.windmill.dev/run/00000000-0000-0000-0000-000000000000?workspace=w")
+        );
+        // BASE_URL defaults to empty; a link built from it would 404 the reader.
+        assert_eq!(job_run_url("", &id, "w"), None);
+        assert_eq!(job_run_url("/", &id, "w"), None);
+    }
+
+    #[test]
+    fn pr_check_error_is_a_field_not_a_substring() {
+        // A diff whose paths embed the sentinel text must not trip the verdict.
+        let diff = r#"{"changes":[{"type":"edited","path":"f/team/PR_MERGE_CONFLICTS.ts"}]}"#;
+        assert_eq!(parse_pr_check_error(diff), None);
+        let sentinel = r#"{"pr_check_error":"PR_MERGE_CONFLICTS","message":"m"}"#;
+        assert_eq!(
+            parse_pr_check_error(sentinel).as_deref(),
+            Some("PR_MERGE_CONFLICTS")
+        );
+    }
+
+    #[test]
+    fn parse_empty_changes_is_in_sync() {
+        // Present-but-empty diff → a real "in sync" result, not None.
+        let (changes, settings) = parse_git_sync_changes(r#"{"changes":[]}"#).unwrap();
+        assert!(changes.is_empty());
+        assert!(!settings);
+    }
+
+    #[test]
+    fn parse_missing_fields_is_none() {
+        // Neither field present → unrecognizable, falls back to the caller's path.
+        assert!(parse_git_sync_changes("{}").is_none());
+    }
+
+    #[test]
+    fn parse_unparseable_is_none() {
+        assert!(parse_git_sync_changes("not json").is_none());
+    }
+
+    #[test]
+    fn parse_changes_and_settings() {
+        let (changes, settings) = parse_git_sync_changes(
+            r#"{"changes":[{"type":"edited","path":"f/a"}],"settingsDiffResult":{"hasChanges":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(changes, vec![("edited".to_string(), "f/a".to_string())]);
+        assert!(settings);
+    }
+
+    #[test]
+    fn format_truncates_over_100() {
+        let changes: Vec<(String, String)> = (0..150)
+            .map(|i| ("edited".to_string(), format!("f/{i}")))
+            .collect();
+        let lines = format_change_list(&changes);
+        assert_eq!(lines.len(), 101);
+        assert_eq!(lines.last().unwrap(), "- ... and 50 more");
+    }
+}
+
+/// When an auto-pull job (carrying `__git_sync_auto_pull`) completes: on success,
+/// record the commit as a head the workspace reflects; on failure, roll the
+/// optimistic `last_synced_sha` advance back to the pre-pull value so the commit
+/// is retried instead of being silently treated as synced, and record the failure.
+/// The recorded commit is the one the pull script reports having checked out
+/// (`{sha, branch}` in its result): the branch can move between the observation
+/// the marker holds and the clone. A result without it falls back to the marker.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+async fn maybe_reconcile_git_sync_auto_pull(
+    db: &DB,
+    job_id: &uuid::Uuid,
+    workspace_id: &str,
+    success: bool,
+    result: &str,
+) {
+    let marker: Option<serde_json::Value> = match sqlx::query_scalar!(
+        "SELECT args->'__git_sync_auto_pull' FROM v2_job WHERE id = $1",
+        job_id
+    )
+    .fetch_optional(db)
+    .await
+    {
+        Ok(v) => v.flatten(),
+        Err(e) => {
+            tracing::error!("git auto-pull: failed to read job args: {e:#}");
+            return;
+        }
+    };
+    let Some(marker) = marker else {
+        return;
+    };
+    #[derive(serde::Deserialize)]
+    struct AutoPullMarker {
+        repo_resource_path: String,
+        branch: Option<String>,
+        head_sha: Option<String>,
+        #[serde(default)]
+        prev_synced: std::collections::HashMap<String, String>,
+    }
+    let Ok(m) = serde_json::from_value::<AutoPullMarker>(marker) else {
+        return;
+    };
+    if success {
+        // The optimistic synced state is already correct; record that the workspace
+        // now reflects the commit, which the PR CI-test check waits for.
+        #[derive(serde::Deserialize)]
+        struct PullResult {
+            sha: Option<String>,
+            branch: Option<String>,
+        }
+        let applied = serde_json::from_str::<PullResult>(result).ok();
+        let branch = applied
+            .as_ref()
+            .and_then(|r| r.branch.as_deref())
+            .or(m.branch.as_deref());
+        let sha = applied
+            .as_ref()
+            .and_then(|r| r.sha.as_deref())
+            .or(m.head_sha.as_deref());
+        if let (Some(branch), Some(sha)) = (branch, sha) {
+            if let Err(e) = windmill_git_sync::record_synced_head(
+                db,
+                workspace_id,
+                &m.repo_resource_path,
+                branch,
+                sha,
+                "pull",
+                Some(*job_id),
+            )
+            .await
+            {
+                tracing::warn!(
+                    "git auto-pull: failed to record synced head {sha} on {branch}: {e:#}"
+                );
+            }
+        }
+        return;
+    }
+    windmill_git_sync::record_auto_pull_failure(
+        db,
+        workspace_id,
+        &m.repo_resource_path,
+        &m.prev_synced,
+        "auto-pull job failed".to_string(),
+    )
+    .await;
+}
+
+/// Branch a git-sync push job deployed to, mirroring the hub script's
+/// derivation: a dev workspace deploys to its environment-label branch
+/// (`dev`, `staging`, ...), other fork workspaces to `wm-fork/<base>/<id-suffix>`,
+/// else the promotion `wm_deploy/**` formula (per-folder or per-item form).
+/// A dev workspace in promotion mode is the exception: it takes the promotion
+/// `wm_deploy/**` formula (per-item PRs into the parent) instead of its label
+/// branch. `None` when the deploy stays on the base branch (workspace-wide
+/// mode) and has no PR to open.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn git_sync_deploy_pr_head_branch(
+    workspace_id: &str,
+    parent_workspace_id: Option<&str>,
+    dev_workspace_label: Option<&str>,
+    base: &str,
+    use_individual_branch: bool,
+    group_by_folder: bool,
+    item_path: &str,
+    item_parent_path: &str,
+    path_type: &str,
+) -> Option<String> {
+    let is_dev = dev_workspace_label.is_some();
+    // A dev workspace with promotion on falls through to the wm_deploy/**
+    // formula below; the label/fork branches only apply when promotion is off.
+    if !(is_dev && use_individual_branch) {
+        if is_dev {
+            return Some(windmill_common::workspaces::dev_workspace_branch(
+                dev_workspace_label,
+            ));
+        }
+        let is_fork = parent_workspace_id.is_some()
+            || workspace_id.starts_with(windmill_common::workspaces::WM_FORK_PREFIX);
+        if is_fork {
+            let suffix = workspace_id
+                .strip_prefix(windmill_common::workspaces::WM_FORK_PREFIX)
+                .unwrap_or(workspace_id);
+            return Some(format!("wm-fork/{base}/{suffix}"));
+        }
+    }
+    if !use_individual_branch {
+        return None;
+    }
+    // Mirrors the CLI's computeGitSyncDeployBranch: user/group objects are
+    // pushed to the base branch and never get their own wm_deploy branch.
+    if path_type == "user" || path_type == "group" {
+        return None;
+    }
+    let git_ref = if !item_path.is_empty() {
+        item_path
+    } else {
+        item_parent_path
+    };
+    if git_ref.is_empty() {
+        return None;
+    }
+    Some(if group_by_folder {
+        format!(
+            "wm_deploy/{workspace_id}/{}",
+            git_ref.split('/').take(2).collect::<Vec<_>>().join("__")
+        )
+    } else {
+        format!(
+            "wm_deploy/{workspace_id}/{}/{}",
+            path_type,
+            git_ref.replace('/', "__")
+        )
+    })
+}
+
+/// Whether the push job's result says a commit was actually pushed. `None`
+/// when the result doesn't carry the flag (hub script versions predating it).
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn git_sync_push_result_pushed(result: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()?
+        .get("pushed")?
+        .as_bool()
+}
+
+/// When a git-sync push job pushed a commit, record it as a head the workspace
+/// reflects, the way a successful pull records the commit it applied. The PR
+/// CI-test check waits for that record. Best-effort: failures are logged, never
+/// propagated.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+async fn maybe_record_git_sync_pushed_head(
+    db: &DB,
+    job_id: &uuid::Uuid,
+    workspace_id: &str,
+    result: &str,
+) {
+    #[derive(serde::Deserialize)]
+    struct PushResult {
+        pushed: bool,
+        sha: Option<String>,
+        branch: Option<String>,
+        #[serde(default)]
+        rebased: bool,
+    }
+    let Ok(PushResult { pushed: true, sha: Some(sha), branch: Some(branch), rebased }) =
+        serde_json::from_str::<PushResult>(result)
+    else {
+        return;
+    };
+    // A push that had to rebase sits on commits this workspace has not pulled, so the
+    // pushed head is not something it reflects yet; the pull those commits trigger
+    // records the head once they are in.
+    if rebased {
+        tracing::info!(
+            "git sync push: {sha} on {branch} was rebased onto unpulled commits; not recording it as synced for {workspace_id}"
+        );
+        return;
+    }
+    let repo_path = match sqlx::query_scalar!(
+        "SELECT args->>'repo_url_resource_path' FROM v2_job WHERE id = $1",
+        job_id
+    )
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some(Some(p))) => p,
+        Ok(_) => return,
+        Err(e) => {
+            tracing::error!("git sync push: failed to read job args: {e:#}");
+            return;
+        }
+    };
+    if let Err(e) = windmill_git_sync::record_synced_head(
+        db,
+        workspace_id,
+        &repo_path,
+        &branch,
+        &sha,
+        "push",
+        Some(*job_id),
+    )
+    .await
+    {
+        tracing::warn!(
+            "git sync push: failed to record pushed head {sha} on {branch} for {workspace_id}/{repo_path}: {e:#}"
+        );
+    }
+}
+
+/// When a git-sync push job carrying `__git_sync_open_pr` succeeds, open (or
+/// reopen) the PR for the branch it pushed: `wm-fork/<base>/<id>` for a fork
+/// deploy, `wm_deploy/**` for a promotion deploy. Runs outbound with the
+/// installation token, so it works regardless of webhook reachability.
+/// Best-effort: failures are logged, never propagated.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+async fn maybe_open_git_sync_deploy_pr(
+    db: &DB,
+    job_id: &uuid::Uuid,
+    workspace_id: &str,
+    result: &str,
+) {
+    // A no-op push (workspace already matches the repo — e.g. the deploy was
+    // itself caused by an auto-pull) must not ensure a PR: it would recreate
+    // PRs the user closed and spam creation attempts with no diff.
+    if git_sync_push_result_pushed(result) == Some(false) {
+        return;
+    }
+    let row = match sqlx::query!(
+        r#"SELECT
+            args->'__git_sync_open_pr' as "marker",
+            args->>'repo_url_resource_path' as "repo_path",
+            args->>'parent_workspace_id' as "parent_workspace_id",
+            args->>'dev_workspace_label' as "dev_workspace_label",
+            args->>'parent_dev_workspace_label' as "parent_dev_workspace_label",
+            COALESCE((args->'use_individual_branch')::bool, false) as "use_individual_branch!",
+            COALESCE((args->'group_by_folder')::bool, false) as "group_by_folder!",
+            COALESCE(args->'items'->0->>'path', args->>'path', '') as "item_path!",
+            COALESCE(args->'items'->0->>'parent_path', args->>'parent_path', '') as "item_parent_path!",
+            COALESCE(args->'items'->0->>'path_type', args->>'path_type', '') as "path_type!",
+            COALESCE(args->'items'->0->>'commit_msg', args->>'commit_msg', '') as "commit_msg!"
+        FROM v2_job WHERE id = $1"#,
+        job_id
+    )
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::error!("git sync PR: failed to read job args: {e:#}");
+            return;
+        }
+    };
+    if row.marker.is_none() {
+        return;
+    }
+    let Some(repo_path) = row.repo_path else {
+        return;
+    };
+
+    // Base = the tracked branch (resource branch, else the repo default). Also
+    // acts as the gate: PR creation needs a credential the server itself holds.
+    let base = match windmill_common::git_sync_ee::managed_pr_base_branch(
+        db,
+        workspace_id,
+        &repo_path,
+    )
+    .await
+    {
+        Ok(Some(branch)) => branch,
+        Ok(None) => {
+            tracing::warn!(
+                "git sync PR: repo {repo_path} in {workspace_id} has a PR-on-deploy toggle set but the server holds no credential for it; skipping (connect the repo through the GitHub App or a GitLab token, or use the open-pr-on-commit workflow)"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("git sync PR: could not resolve base branch for {repo_path}: {e:#}");
+            return;
+        }
+    };
+
+    let Some(head) = git_sync_deploy_pr_head_branch(
+        workspace_id,
+        row.parent_workspace_id.as_deref(),
+        row.dev_workspace_label.as_deref(),
+        &base,
+        row.use_individual_branch,
+        row.group_by_folder,
+        &row.item_path,
+        &row.item_parent_path,
+        &row.path_type,
+    ) else {
+        return;
+    };
+
+    let repo_url = match windmill_common::git_sync_ee::resolve_repo_url_interpolated(
+        db,
+        workspace_id,
+        &repo_path,
+    )
+    .await
+    {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::warn!("git sync PR: could not resolve repo url for {repo_path}: {e:#}");
+            return;
+        }
+    };
+    // A fork of a dev workspace diverged from the dev's label branch, so its PR
+    // merges back there; everything else targets the tracked branch.
+    let pr_base = row.parent_dev_workspace_label.as_deref().unwrap_or(&base);
+    match windmill_common::git_sync_ee::ensure_pull_request(
+        db,
+        workspace_id,
+        &repo_url,
+        &head,
+        pr_base,
+        &row.commit_msg,
+    )
+    .await
+    {
+        Ok(()) => {
+            persist_git_sync_open_pr_error(db, workspace_id, &repo_path, None).await;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "git sync PR: failed to open PR {head} -> {pr_base} for {repo_path}: {e:#}"
+            );
+            let msg: String = format!("{e:#}").chars().take(400).collect();
+            persist_git_sync_open_pr_error(db, workspace_id, &repo_path, Some(msg)).await;
+        }
+    }
+}
+
+/// Best-effort: record (or clear) the last PR-creation failure on the repo's
+/// settings so the toggle can explain a silent no-op in the UI (the usual
+/// cause is a GitHub App installation that hasn't approved the pull-request
+/// permission yet). Merges into a fresh read of the row, only writes on change.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+async fn persist_git_sync_open_pr_error(
+    db: &DB,
+    workspace_id: &str,
+    repo_path: &str,
+    error: Option<String>,
+) {
+    // Single targeted update (like the EE auto-pull status writer): a full
+    // read-modify-write of the column would race the poller's concurrent
+    // last_synced_sha/last_pull_status writes and silently clobber them.
+    let bare_path = repo_path.trim_start_matches("$res:");
+    let result: error::Result<()> = async {
+        sqlx::query!(
+            r#"
+            UPDATE workspace_settings
+            SET git_sync = jsonb_set(
+                git_sync,
+                '{repositories}',
+                (SELECT jsonb_agg(
+                    CASE WHEN elem->>'git_repo_resource_path' IN ($2, '$res:' || $2)
+                        THEN CASE WHEN $3::text IS NULL THEN elem - 'open_pr_error'
+                             ELSE jsonb_set(elem, '{open_pr_error}', to_jsonb($3::text), true) END
+                        ELSE elem END)
+                 FROM jsonb_array_elements(git_sync->'repositories') AS elem)
+            )
+            WHERE workspace_id = $1
+              AND jsonb_typeof(git_sync->'repositories') = 'array'
+            "#,
+            workspace_id,
+            bare_path,
+            error.as_deref(),
+        )
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!("git sync PR: failed to persist open_pr_error for {repo_path}: {e:#}");
+    }
+}
+
+/// When a git-sync pull job carrying a check marker completes, post the outcome
+/// to its GitHub check run: the PR diff preview (`__git_sync_pr_check`, phase 4)
+/// or the live deploy status (`__git_sync_deploy_check`, phase 6).
+/// A one-line description of the repo's sync filters, appended to an "in sync"
+/// PR verdict: a PR that only touches files outside these paths deploys
+/// nothing on merge, which otherwise looks like a wrong verdict.
+#[cfg(all(feature = "enterprise", feature = "private"))]
+fn format_git_sync_scope_note(include: &[String], exclude: &[String]) -> Option<String> {
+    if include.is_empty() {
+        return None;
+    }
+    let fmt = |paths: &[String]| {
+        paths
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut note = format!(
+        "\n\nOnly files matching this repository's sync filters deploy on merge: {}",
+        fmt(include)
+    );
+    if !exclude.is_empty() {
+        note.push_str(&format!(" (excluding {})", fmt(exclude)));
+    }
+    note.push('.');
+    Some(note)
+}
+
+#[cfg(all(feature = "enterprise", feature = "private"))]
+async fn git_sync_repo_scope_note(
+    db: &DB,
+    workspace_id: &str,
+    repo_path: Option<&str>,
+) -> Option<String> {
+    let repo_path = repo_path?;
+    let settings = sqlx::query_scalar!(
+        "SELECT git_sync FROM workspace_settings WHERE workspace_id = $1",
+        workspace_id
+    )
+    .fetch_optional(db)
+    .await
+    .ok()?
+    .flatten()?;
+    let settings: windmill_common::workspaces::WorkspaceGitSyncSettings =
+        serde_json::from_value(settings).ok()?;
+    // Job args carry the bare resource path; stored settings keep the $res: prefix.
+    let repo = settings.repositories.iter().find(|r| {
+        r.git_repo_resource_path.trim_start_matches("$res:")
+            == repo_path.trim_start_matches("$res:")
+    })?;
+    let s = repo.settings.as_ref()?;
+    format_git_sync_scope_note(
+        &s.include_path,
+        s.exclude_path.as_deref().unwrap_or_default(),
+    )
+}
+
+#[cfg(all(feature = "enterprise", feature = "private"))]
+async fn maybe_post_git_sync_check(
+    db: &DB,
+    job_id: &uuid::Uuid,
+    workspace_id: &str,
+    success: bool,
+    result_raw: &str,
+) {
+    // Only git-sync pull jobs carry one of these markers; everything else no-ops.
+    let row = match sqlx::query!(
+        r#"SELECT args->'__git_sync_pr_check' AS "pr", args->'__git_sync_deploy_check' AS "deploy",
+           args->>'repo_url_resource_path' AS "repo_path"
+           FROM v2_job WHERE id = $1"#,
+        job_id
+    )
+    .fetch_optional(db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("git sync-check: failed to read job args: {e:#}");
+            return;
+        }
+    };
+    let Some(row) = row else {
+        return;
+    };
+    // A PR dry-run and a deploy pull are mutually exclusive markers.
+    let (is_deploy, marker) = match (row.pr, row.deploy) {
+        (Some(pr), _) => (false, pr),
+        (None, Some(deploy)) => (true, deploy),
+        (None, None) => return,
+    };
+    let Ok(check) = serde_json::from_value::<GitSyncCheck>(marker) else {
+        return;
+    };
+    // Job args are persisted, so the repository URL is not among them: it is
+    // re-resolved here from the resource path the pull job carries. A marker
+    // written before that change still has the URL, and is honoured until the
+    // last such job has drained.
+    // The resource path is mutable, so it is only trusted when the marker also
+    // carries the identity to check it against. A marker written before that
+    // identity existed keeps using the URL it captured at enqueue, which cannot
+    // have been repointed since.
+    let repo_url = match (
+        check.repo.is_some(),
+        row.repo_path.as_deref(),
+        check.repo_url.clone(),
+    ) {
+        // The resource path is mutable, so following it is only safe when the
+        // marker also carries the identity to check the result against.
+        (true, Some(path), _) => {
+            windmill_common::git_sync_ee::resolve_repo_url_interpolated(db, workspace_id, path)
+                .await
+        }
+        // A marker written before that identity existed captured the URL itself,
+        // which cannot have been repointed since.
+        (_, _, Some(url)) => {
+            windmill_common::variables::get_variable_or_self(url, db, workspace_id).await
+        }
+        // Neither: nothing here can prove which repository this check belongs to,
+        // and resolving the path anyway is how a preview reaches the wrong one.
+        // Leaving the check unfinished is the safe failure.
+        _ => {
+            tracing::error!(
+                "git sync-check: the marker carries neither a repository identity nor a url; not acting on it"
+            );
+            return;
+        }
+    };
+    let repo_url = match repo_url {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("git sync-check: cannot resolve repo url: {e:#}");
+            return;
+        }
+    };
+    // A resource repointed while the diff was running would otherwise close a
+    // check, or post a preview, on a repository that has nothing to do with it.
+    if check.repo.is_some() && windmill_common::git_sync_ee::repo_identity(&repo_url) != check.repo
+    {
+        tracing::warn!(
+            "git sync-check: the repository moved since the check was created; leaving it alone"
+        );
+        return;
+    }
+    // "In sync" on a PR that visibly changes files reads as a bug when those
+    // files are outside the repo's sync filters — say what the scope is.
+    let scope_note = if !is_deploy && success {
+        git_sync_repo_scope_note(db, workspace_id, row.repo_path.as_deref()).await
+    } else {
+        None
+    };
+    // The creating call could only link the check to the workspace's run list —
+    // the check predates the job fulfilling it. Now that the job is known, point
+    // both the summary and the check's "Details" link at its logs.
+    let job_url = job_run_url(&windmill_common::BASE_URL.load(), job_id, workspace_id);
+
+    let (conclusion, title, summary): (&str, String, String) = if is_deploy {
+        // Phase 6: real deploy pull -> "Deployed N changes" / "In sync" / failure.
+        if !success {
+            (
+                "failure",
+                format!("Deploy to {} failed", workspace_id),
+                "Deploying the latest commit failed.".to_string(),
+            )
+        } else {
+            match parse_git_sync_changes(result_raw) {
+                Some((changes, settings_changed)) if changes.is_empty() && !settings_changed => (
+                    "success",
+                    format!("In sync with {}", workspace_id),
+                    format!(
+                        "No changes to deploy to `{}` from this commit.",
+                        workspace_id
+                    ),
+                ),
+                Some((changes, settings_changed)) => {
+                    let mut lines = vec![format!(
+                        "Deployed {} change(s) to `{}`:\n",
+                        changes.len(),
+                        workspace_id
+                    )];
+                    lines.extend(format_change_list(&changes));
+                    if settings_changed {
+                        lines.push("\nWorkspace settings also changed.".to_string());
+                    }
+                    (
+                        "success",
+                        format!("Deployed {} change(s) to {}", changes.len(), workspace_id),
+                        lines.join("\n"),
+                    )
+                }
+                None => (
+                    "success",
+                    format!("Deployed to {}", workspace_id),
+                    format!("Windmill deployed the latest commit to `{}`.", workspace_id),
+                ),
+            }
+        }
+    } else {
+        // Phase 4: dry-run diff preview for a PR. An unmergeable PR has no
+        // diff; the pull script reports which sentinel applies (returned as a
+        // result — thrown bun errors reach the job result as truncated log tails).
+        let pr_check_error = parse_pr_check_error(result_raw);
+        if pr_check_error.as_deref() == Some("PR_MERGE_CONFLICTS") {
+            (
+                "failure",
+                "Merge conflicts with the base branch".to_string(),
+                "This branch cannot be merged cleanly, so there is no deploy diff to compute. Resolve the conflicts and push again to re-run this check."
+                    .to_string(),
+            )
+        } else if pr_check_error.as_deref() == Some("PR_HEAD_REF_UNAVAILABLE") {
+            // Neutral, not failure: a transient fetch problem is Windmill-side
+            // and, unlike conflicts, has no fixing push that would re-run the
+            // check on its own — it must not hard-block the PR.
+            (
+                "neutral",
+                "Could not compute the deploy diff".to_string(),
+                "Windmill could not fetch this branch's head, or enough history, to compute its merge with the base. Push again to re-run this check."
+                    .to_string(),
+            )
+        } else if pr_check_error.is_some() {
+            // Unknown sentinel (script newer than this backend): an explicit
+            // error signal must not degrade into a "diff computed" verdict.
+            (
+                "failure",
+                "Windmill diff failed".to_string(),
+                "The dry-run pull reported an unrecognized error.".to_string(),
+            )
+        } else if !success {
+            (
+                "failure",
+                "Windmill diff failed".to_string(),
+                "The dry-run pull to compute the diff failed.".to_string(),
+            )
+        } else {
+            match parse_git_sync_changes(result_raw) {
+                Some((changes, settings_changed)) if changes.is_empty() && !settings_changed => (
+                    "success",
+                    "In sync".to_string(),
+                    format!(
+                        "Merging this branch would make no changes to the workspace.{}",
+                        scope_note.as_deref().unwrap_or_default()
+                    ),
+                ),
+                Some((changes, settings_changed)) => {
+                    let mut lines = vec![format!(
+                        "Merging this branch would apply {} change(s) to the workspace:\n",
+                        changes.len()
+                    )];
+                    lines.extend(format_change_list(&changes));
+                    if settings_changed {
+                        lines.push(match check.wmill_yaml_changed {
+                            Some(true) => "\nThis branch changes wmill.yaml: pulling also applies the updated workspace settings.".to_string(),
+                            Some(false) => "\nIndependent of this branch, the workspace's git-sync settings differ from the repo's wmill.yaml and a pull updates them to match.".to_string(),
+                            None => "\nA pull also updates the workspace's git-sync settings to match the repo's wmill.yaml.".to_string(),
+                        });
+                    }
+                    (
+                        "neutral",
+                        format!("{} change(s) to deploy", changes.len()),
+                        lines.join("\n"),
+                    )
+                }
+                None => (
+                    "neutral",
+                    "Diff computed".to_string(),
+                    "Windmill computed a diff but could not summarize it.".to_string(),
+                ),
+            }
+        }
+    };
+
+    let check_summary = match job_url.as_deref() {
+        Some(url) => format!("{summary}\n\n[See the job in Windmill]({url})"),
+        None => summary.clone(),
+    };
+    if let Some(check_run_id) = check.check_run_id {
+        if let Err(e) = windmill_common::git_sync_ee::update_check_run(
+            db,
+            workspace_id,
+            &repo_url,
+            check_run_id,
+            conclusion,
+            &title,
+            &check_summary,
+            job_url.as_deref(),
+        )
+        .await
+        {
+            tracing::error!("git sync-check: failed to update check run: {e:#}");
+        }
+    }
+
+    // Phase 4 also maintains ONE managed comment on the PR (Cloudflare
+    // deploy-preview style): upserted on every synchronize, so reviewers see the
+    // current diff without opening the Checks tab.
+    if !is_deploy {
+        if let Some(pr_number) = check.pr_number {
+            let marker = "<!-- windmill-diff -->";
+            let head = check
+                .head_sha
+                .as_deref()
+                .map(|s| &s[..s.len().min(7)])
+                .unwrap_or("latest");
+            let job_row = job_url
+                .as_deref()
+                .map(|url| format!("\n| **Job** | [See the logs]({url}) |"))
+                .unwrap_or_default();
+            let body = format!(
+                "{marker}\n### Windmill deploy preview\n\n| | |\n|---|---|\n| **Workspace** | `{workspace_id}` |\n| **Status** | {title} |\n| **Commit** | `{head}` |{job_row}\n\n<details><summary>Details</summary>\n\n{summary}\n\n</details>"
+            );
+            if let Err(e) = windmill_common::git_sync_ee::upsert_pr_comment(
+                db,
+                workspace_id,
+                &repo_url,
+                pr_number,
+                marker,
+                &body,
+            )
+            .await
+            {
+                tracing::warn!("git sync-check: failed to upsert PR diff comment: {e:#}");
+            }
+        }
+    }
+}
+
+pub async fn process_completed_job(
+    JobCompleted {
+        job,
+        result,
+        mem_peak,
+        success,
+        cached_res_path,
+        canceled_by,
+        duration,
+        result_columns,
+        preprocessed_args,
+        from_cache,
+        flow_runners,
+        done_tx,
+        ..
+    }: JobCompleted,
+    client: &AuthedClient,
+    db: &DB,
+    worker_dir: &str,
+    same_worker_tx: Option<&SameWorkerSender>,
+    worker_name: &str,
+    job_completed_tx: JobCompletedSender,
+    killpill_rx: &tokio::sync::broadcast::Receiver<()>,
+    #[cfg(feature = "benchmark")] bench: &mut BenchmarkIter,
+) -> error::Result<Option<Arc<MiniPulledJob>>> {
+    if success {
+        // println!("bef completed job{:?}",  SystemTime::now());
+        if let Some(cached_path) = cached_res_path {
+            save_in_cache(db, client, &job, cached_path, result.clone()).await;
+        }
+
+        let is_flow_step = job.is_flow_step();
+        let parent_job = job.parent_job.clone();
+        let job_id = job.id.clone();
+        let workspace_id = job.workspace_id.clone();
+        let started_at = job.started_at.clone();
+
+        if job.flow_step_id.as_deref() == Some("preprocessor") {
+            // Do this before inserting to `v2_job_completed` for backwards compatibility
+            // when we set `flow_status->_metadata->preprocessed_args` to true.
+
+            sqlx::query!(
+                r#"UPDATE v2_job SET
+                    args = '{"reason":"PREPROCESSOR_ARGS_ARE_DISCARDED"}'::jsonb,
+                    preprocessed = TRUE
+                WHERE id = $1 AND preprocessed = FALSE"#,
+                job.id
+            )
+            .execute(db)
+            .await
+            .map_err(|e| {
+                Error::InternalErr(format!(
+                    "error while deleting args of preprocessing step: {e:#}"
+                ))
+            })?;
+        } else if let Some(preprocessed_args) = preprocessed_args {
+            // Update script args to preprocessed args, but preserve a
+            // resolved pipeline `partition` (injected before the body ran
+            // by resolve_partition_for_job). Run identity is immutable —
+            // the preprocessor must not change or drop it, or the asset
+            // cascade would read no partition for this producer.
+            windmill_common::partition::merge_args_preserving_partition(
+                db,
+                job.id,
+                preprocessed_args,
+            )
+            .await?;
+        }
+
+        add_time!(bench, "pre add_completed_job");
+
+        let (_, duration) = add_completed_job(
+            db,
+            &job,
+            true,
+            false,
+            Json(&result),
+            result_columns,
+            mem_peak.to_owned(),
+            canceled_by.clone(),
+            false,
+            duration,
+            from_cache.unwrap_or(false),
+        )
+        .await?;
+        #[cfg(all(feature = "enterprise", feature = "private"))]
+        if job.kind == JobKind::DeploymentCallback {
+            maybe_post_git_sync_check(db, &job_id, &workspace_id, true, result.get()).await;
+            maybe_reconcile_git_sync_auto_pull(db, &job_id, &workspace_id, true, result.get())
+                .await;
+            maybe_record_git_sync_pushed_head(db, &job_id, &workspace_id, result.get()).await;
+            maybe_open_git_sync_deploy_pr(db, &job_id, &workspace_id, result.get()).await;
+        }
+        // A CI test job just finished: advance any open "Windmill CI tests" PR check for
+        // its workspace. Detached, since concluding a check calls GitHub and this loop
+        // completes jobs serially; the evaluation is idempotent and the poller retries.
+        #[cfg(all(feature = "enterprise", feature = "private"))]
+        if job
+            .trigger_kind
+            .as_ref()
+            .is_some_and(|k| k.is(windmill_common::jobs::JobTriggerKind::CiTest))
+        {
+            let db = db.clone();
+            let w_id = workspace_id.clone();
+            tokio::spawn(async move {
+                windmill_git_sync::evaluate_and_conclude_ci_test_checks(&db, &w_id).await
+            });
+        }
+
+        // Asset-trigger fan-out: best-effort, never propagates errors.
+        // Internal eligibility checks gate to top-level Script/Preview runs;
+        // see windmill_queue::asset_dispatch.
+        asset_dispatch::dispatch_asset_triggers(db, &job).await;
+
+        drop(job);
+
+        add_time!(bench, "add_completed_job END");
+
+        if is_flow_step {
+            if let Some(parent_job) = parent_job {
+                // tracing::info!(parent_flow = %parent_job, subflow = %job_id, "updating flow status (2)");
+                let r = update_flow_status_after_job_completion(
+                    db,
+                    client,
+                    parent_job,
+                    &job_id,
+                    &workspace_id,
+                    true,
+                    canceled_by,
+                    result,
+                    started_at.map(|x| FlowJobDuration { started_at: x, duration_ms: duration }),
+                    StepFailureKind::Normal,
+                    &same_worker_tx.expect(SAME_WORKER_REQUIREMENTS).to_owned(),
+                    &worker_dir,
+                    None,
+                    worker_name,
+                    job_completed_tx,
+                    flow_runners,
+                    killpill_rx,
+                    #[cfg(feature = "benchmark")]
+                    bench,
+                )
+                .warn_after_seconds(10)
+                .await?;
+                add_time!(bench, "updated flow status END");
+                if let Some(done_tx) = done_tx {
+                    done_tx
+                        .send(())
+                        .expect("done receiver should still be alive");
+                }
+                return Ok(r);
+            }
+        }
+    } else {
+        // The result already carries our injected
+        // `error: { name: "ManualFailure", ... }` marker when process_jc
+        // retagged a successful run as a failure — store it as-is to preserve
+        // sibling fields like `windmill_status_code`. We check for the
+        // injected marker specifically (not just the presence of a
+        // `wm_failure` field) so a real runtime failure whose raw
+        // result happens to contain a `wm_failure` field still goes
+        // through the standard `WrappedError { error: ... }` wrap path.
+        let downstream_result: Arc<Box<RawValue>> = if is_pre_shaped_wm_failure_result(result.get())
+        {
+            windmill_queue::add_completed_job_pre_shaped_failure(
+                db,
+                &job,
+                mem_peak.to_owned(),
+                canceled_by.clone(),
+                Json(&*result),
+                worker_name,
+                false,
+                None,
+            )
+            .await?;
+            result.clone()
+        } else {
+            let wrapped = add_completed_job_error(
+                db,
+                &job,
+                mem_peak.to_owned(),
+                canceled_by.clone(),
+                serde_json::from_str(result.get()).unwrap_or_else(
+                    |_| json!({ "message": format!("Non serializable error: {}", result.get()) }),
+                ),
+                worker_name,
+                false,
+                None,
+            )
+            .await?;
+            Arc::new(serde_json::value::to_raw_value(&wrapped).unwrap())
+        };
+        #[cfg(all(feature = "enterprise", feature = "private"))]
+        if job.kind == JobKind::DeploymentCallback {
+            maybe_post_git_sync_check(db, &job.id, &job.workspace_id, false, result.get()).await;
+            maybe_reconcile_git_sync_auto_pull(db, &job.id, &job.workspace_id, false, "").await;
+        }
+        // A failed CI test job also settles its check; same detached advance as on success.
+        #[cfg(all(feature = "enterprise", feature = "private"))]
+        if job
+            .trigger_kind
+            .as_ref()
+            .is_some_and(|k| k.is(windmill_common::jobs::JobTriggerKind::CiTest))
+        {
+            let db = db.clone();
+            let w_id = job.workspace_id.clone();
+            tokio::spawn(async move {
+                windmill_git_sync::evaluate_and_conclude_ci_test_checks(&db, &w_id).await
+            });
+        }
+        if job.is_flow_step() {
+            if let Some(parent_job) = job.parent_job {
+                tracing::error!(parent_flow = %parent_job, subflow = %job.id, "process completed job error, updating flow status");
+                let r = update_flow_status_after_job_completion(
+                    db,
+                    client,
+                    parent_job,
+                    &job.id,
+                    &job.workspace_id,
+                    false,
+                    canceled_by,
+                    downstream_result,
+                    duration.and_then(|d| {
+                        job.started_at.map(|started_at| FlowJobDuration {
+                            started_at: started_at,
+                            duration_ms: d,
+                        })
+                    }),
+                    StepFailureKind::Normal,
+                    &same_worker_tx.expect(SAME_WORKER_REQUIREMENTS).to_owned(),
+                    &worker_dir,
+                    None,
+                    worker_name,
+                    job_completed_tx,
+                    flow_runners,
+                    killpill_rx,
+                    #[cfg(feature = "benchmark")]
+                    bench,
+                )
+                .warn_after_seconds(10)
+                .await?;
+                if let Some(done_tx) = done_tx {
+                    done_tx
+                        .send(())
+                        .expect("done receiver should still be alive");
+                }
+                return Ok(r);
+            }
+        }
+    }
+    return Ok(None);
+}
+
+pub async fn handle_non_flow_job_error(
+    db: &DB,
+    job: &MiniCompletedJob,
+    mem_peak: i32,
+    canceled_by: Option<CanceledBy>,
+    err_string: String,
+    err_json: Value,
+    worker_name: &str,
+) -> Result<WrappedError, Error> {
+    append_logs(
+        &job.id,
+        &job.workspace_id,
+        format!("Unexpected error during job execution:\n{err_string}"),
+        &db.into(),
+    )
+    .await;
+    add_completed_job_error(
+        db,
+        job,
+        mem_peak,
+        canceled_by,
+        err_json,
+        worker_name,
+        false,
+        None,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "job_error", level = "info", skip_all, fields(job_id = %job.id))]
+pub async fn handle_job_error(
+    db: &DB,
+    client: &AuthedClient,
+    job: &MiniCompletedJob,
+    mem_peak: i32,
+    canceled_by: Option<CanceledBy>,
+    err: Error,
+    step_failure: StepFailureKind,
+    same_worker_tx: Option<&SameWorkerSender>,
+    worker_dir: &str,
+    worker_name: &str,
+    job_completed_tx: JobCompletedSender,
+    killpill_rx: &tokio::sync::broadcast::Receiver<()>,
+    #[cfg(feature = "benchmark")] bench: &mut BenchmarkIter,
+) {
+    let err_string = format!("{}: {}", err.name(), err.to_string());
+    let err_json = error_to_value(&err);
+
+    let update_job_future = || async {
+        handle_non_flow_job_error(
+            db,
+            job,
+            mem_peak,
+            canceled_by.clone(),
+            err_string,
+            err_json.clone(),
+            worker_name,
+        )
+        .warn_after_seconds(10)
+        .await
+    };
+
+    let update_job_future = if job.is_flow_step() || job.is_flow() {
+        let (flow, job_status_to_update) = if let Some(parent_job_id) = job.parent_job {
+            if let Err(e) = update_job_future().await {
+                tracing::error!(
+                    "error updating job future for job {} for handle_job_error: {e:#}",
+                    job.id
+                );
+            }
+            (parent_job_id, job.id)
+        } else {
+            (job.id, Uuid::nil())
+        };
+
+        let wrapped_error = WrappedError { error: err_json.clone() };
+        tracing::error!(parent_flow = %flow, subflow = %job_status_to_update, "handle job error, updating flow status: {err_json:?}");
+        let updated_flow = update_flow_status_after_job_completion(
+            db,
+            client,
+            flow,
+            &job_status_to_update,
+            &job.workspace_id,
+            false,
+            canceled_by.clone(),
+            Arc::new(serde_json::value::to_raw_value(&wrapped_error).unwrap()),
+            None,
+            step_failure,
+            &same_worker_tx.expect(SAME_WORKER_REQUIREMENTS).clone(),
+            worker_dir,
+            None,
+            worker_name,
+            job_completed_tx.clone(),
+            None,
+            killpill_rx,
+            #[cfg(feature = "benchmark")]
+            bench,
+        )
+        .await;
+
+        if let Err(err) = updated_flow {
+            if let Some(parent_job_id) = job.parent_job {
+                if let Ok(Some(parent_job)) =
+                    get_mini_completed_job(&parent_job_id, &job.workspace_id, db)
+                        .warn_after_seconds(10)
+                        .await
+                {
+                    let e = json!({"message": err.to_string(), "name": "InternalErr"});
+                    append_logs(
+                        &parent_job.id,
+                        &job.workspace_id,
+                        format!("Unexpected error during flow job error handling:\n{err}"),
+                        &db.into(),
+                    )
+                    .await;
+                    let _ = add_completed_job_error(
+                        db,
+                        &parent_job,
+                        mem_peak,
+                        canceled_by.clone(),
+                        e,
+                        worker_name,
+                        false,
+                        None,
+                    )
+                    .warn_after_seconds(10)
+                    .await;
+                }
+            }
+        }
+
+        None
+    } else {
+        Some(update_job_future)
+    };
+    if let Some(f) = update_job_future {
+        let _ = f().await;
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SerializedError {
+    pub message: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+pub fn extract_error_value(
+    program: &str,
+    log_lines: &str,
+    i: i32,
+    step_id: Option<String>,
+) -> Box<RawValue> {
+    return to_raw_value(&SerializedError {
+        message: format!(
+            "exit code for \"{program}\": {i}, last log lines:\n{}",
+            ANSI_ESCAPE_RE.replace_all(log_lines.trim(), "").to_string()
+        ),
+        name: "ExecutionErr".to_string(),
+        step_id,
+        exit_code: Some(i),
+    });
+}
+
+#[cfg(all(test, feature = "enterprise", feature = "private"))]
+mod git_sync_pr_tests {
+    use super::{git_sync_deploy_pr_head_branch, git_sync_push_result_pushed};
+
+    #[test]
+    fn user_and_group_items_get_no_promotion_branch() {
+        for path_type in ["user", "group"] {
+            assert_eq!(
+                git_sync_deploy_pr_head_branch(
+                    "ws",
+                    None,
+                    None,
+                    "main",
+                    true,
+                    false,
+                    "u/someone",
+                    "",
+                    path_type
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn scope_note_lists_filters() {
+        use super::format_git_sync_scope_note;
+        assert_eq!(format_git_sync_scope_note(&[], &[]), None);
+        assert_eq!(
+            format_git_sync_scope_note(&["f/**".into()], &[]).unwrap(),
+            "\n\nOnly files matching this repository's sync filters deploy on merge: `f/**`."
+        );
+        assert_eq!(
+            format_git_sync_scope_note(&["f/**".into(), "u/**".into()], &["f/pat/**".into()])
+                .unwrap(),
+            "\n\nOnly files matching this repository's sync filters deploy on merge: `f/**`, `u/**` (excluding `f/pat/**`)."
+        );
+    }
+
+    #[test]
+    fn push_result_pushed_flag() {
+        assert_eq!(
+            git_sync_push_result_pushed(r#"{"pushed": true}"#),
+            Some(true)
+        );
+        assert_eq!(
+            git_sync_push_result_pushed(r#"{"pushed": false}"#),
+            Some(false)
+        );
+        // Older hub script versions return null / no flag: undetermined.
+        assert_eq!(git_sync_push_result_pushed("null"), None);
+        assert_eq!(git_sync_push_result_pushed(r#"{"other": 1}"#), None);
+        assert_eq!(git_sync_push_result_pushed("not json"), None);
+    }
+
+    #[test]
+    fn fork_branch_wins_and_strips_the_id_prefix() {
+        // Generated fork id: branch suffix drops the wm-fork- prefix.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "wm-fork-abc",
+                Some("prod"),
+                None,
+                "main",
+                false,
+                false,
+                "",
+                "",
+                ""
+            ),
+            Some("wm-fork/main/abc".to_string())
+        );
+        // Dev workspace (prefix-less id, detected via parent): verbatim suffix.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "staging",
+                Some("prod"),
+                None,
+                "main",
+                false,
+                false,
+                "",
+                "",
+                ""
+            ),
+            Some("wm-fork/main/staging".to_string())
+        );
+        // Orphaned fork (parent deleted): the id prefix still identifies it.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "wm-fork-abc",
+                None,
+                None,
+                "main",
+                true,
+                false,
+                "f/x/y",
+                "",
+                "script"
+            ),
+            Some("wm-fork/main/abc".to_string())
+        );
+    }
+
+    #[test]
+    fn promotion_branch_matches_the_hub_script_formula() {
+        // Per-item form: wm_deploy/<ws>/<path_type>/<path with / -> __>.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev",
+                None,
+                None,
+                "main",
+                true,
+                false,
+                "f/folder/my_script",
+                "",
+                "script"
+            ),
+            Some("wm_deploy/dev/script/f__folder__my_script".to_string())
+        );
+        // Grouped-by-folder form: first two path segments joined by __.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev",
+                None,
+                None,
+                "main",
+                true,
+                true,
+                "f/folder/my_script",
+                "",
+                "script"
+            ),
+            Some("wm_deploy/dev/f__folder".to_string())
+        );
+        // Renamed object: falls back to the parent path.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev",
+                None,
+                None,
+                "main",
+                true,
+                false,
+                "",
+                "f/folder/old",
+                "script"
+            ),
+            Some("wm_deploy/dev/script/f__folder__old".to_string())
+        );
+    }
+
+    #[test]
+    fn no_branch_when_deploy_stays_on_base() {
+        // Workspace-wide mode commits straight to the tracked branch.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev", None, None, "main", false, false, "f/x/y", "", "script"
+            ),
+            None
+        );
+        // Promotion mode but no per-item ref (e.g. user/group objects).
+        assert_eq!(
+            git_sync_deploy_pr_head_branch("dev", None, None, "main", true, false, "", "", "user"),
+            None
+        );
+    }
+
+    #[test]
+    fn dev_workspace_label_branch_wins() {
+        // Dev workspaces deploy to their environment-label branch verbatim.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "staging-ws",
+                Some("prod"),
+                Some("staging"),
+                "main",
+                false,
+                false,
+                "",
+                "",
+                ""
+            ),
+            Some("staging".to_string())
+        );
+        // Label present even on a wm-fork-prefixed id: label still wins.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "wm-fork-x",
+                Some("prod"),
+                Some("dev"),
+                "main",
+                false,
+                false,
+                "",
+                "",
+                ""
+            ),
+            Some("dev".to_string())
+        );
+    }
+
+    #[test]
+    fn dev_workspace_promotion_uses_wm_deploy_branch() {
+        // Promotion on: a dev workspace gets per-item wm_deploy/** branches
+        // (namespaced by its own id), not its env-label branch.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev",
+                Some("prod"),
+                Some("dev"),
+                "main",
+                true,
+                false,
+                "f/folder/my_script",
+                "",
+                "script"
+            ),
+            Some("wm_deploy/dev/script/f__folder__my_script".to_string())
+        );
+        // Per-folder form still honored for a promotion dev workspace.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev",
+                Some("prod"),
+                Some("dev"),
+                "main",
+                true,
+                true,
+                "f/folder/my_script",
+                "",
+                "script"
+            ),
+            Some("wm_deploy/dev/f__folder".to_string())
+        );
+        // Promotion off: the env-label branch still wins.
+        assert_eq!(
+            git_sync_deploy_pr_head_branch(
+                "dev",
+                Some("prod"),
+                Some("dev"),
+                "main",
+                false,
+                false,
+                "f/x/y",
+                "",
+                "script"
+            ),
+            Some("dev".to_string())
+        );
+    }
+
+    #[test]
+    fn dev_promotion_user_group_items_open_no_pr() {
+        // User/group objects get no wm_deploy branch even on a dev workspace; the
+        // CLI isolates them to the env-label branch, so the backend opens no PR
+        // (never a PR from the env-label branch into the parent for these).
+        for path_type in ["user", "group"] {
+            assert_eq!(
+                git_sync_deploy_pr_head_branch(
+                    "dev",
+                    Some("prod"),
+                    Some("dev"),
+                    "main",
+                    true,
+                    false,
+                    "u/alice",
+                    "",
+                    path_type
+                ),
+                None
+            );
+        }
+    }
+}
