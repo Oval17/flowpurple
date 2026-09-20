@@ -8660,6 +8660,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "opentelemetry-appender-tracing"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14813,7 +14827,7 @@ dependencies = [
  "jsonwebtoken 8.3.0",
  "lazy_static",
  "once_cell",
- "opentelemetry 0.30.0",
+ "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.30.0",
  "prometheus",
  "rand 0.9.0",
@@ -15643,7 +15657,7 @@ dependencies = [
  "native-tls",
  "once_cell",
  "openidconnect",
- "opentelemetry 0.30.0",
+ "opentelemetry 0.32.0",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp 0.30.0",
  "opentelemetry-semantic-conventions 0.30.0",
@@ -16749,7 +16763,7 @@ dependencies = [
  "native-tls",
  "nix 0.27.1",
  "once_cell",
- "opentelemetry 0.30.0",
+ "opentelemetry 0.32.0",
  "opentelemetry-proto 0.30.0",
  "oracle",
  "parquet",
