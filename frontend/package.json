@@ -111,7 +111,7 @@
 		"ag-charts-community": "^9.0.1",
 		"ag-charts-enterprise": "^9.0.1",
 		"ag-grid-community": "^31.3.4",
-		"ag-grid-enterprise": "^31.3.4",
+		"ag-grid-enterprise": "^36.2.0",
 		"ansi_up": "^6.0.6",
 		"chart.js": "^4.4.6",
 		"chartjs-adapter-date-fns": "^3.0.0",
