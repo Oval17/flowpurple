@@ -16723,7 +16723,7 @@ dependencies = [
  "chrono",
  "const_format",
  "convert_case 0.6.0",
- "derive_more 1.0.0",
+ "derive_more 2.1.1",
  "dotenv",
  "eventsource-stream",
  "flate2",
