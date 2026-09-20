@@ -3975,6 +3975,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "deno_features"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b9b27885d633cc0be06b0dc63984332149a63bc746548b7eea03ff8958c7f37"
+dependencies = [
+ "deno_core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "deno_fetch"
 version = "0.233.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3987,8 +3998,8 @@ dependencies = [
  "deno_error 0.6.1",
  "deno_fs",
  "deno_path_util",
- "deno_permissions",
- "deno_tls",
+ "deno_permissions 0.68.0",
+ "deno_tls 0.196.0",
  "dyn-clone",
  "error_reporter",
  "h2 0.4.19",
@@ -4027,7 +4038,7 @@ dependencies = [
  "deno_error 0.6.1",
  "deno_io",
  "deno_path_util",
- "deno_permissions",
+ "deno_permissions 0.68.0",
  "filetime",
  "junction",
  "libc",
@@ -4098,11 +4109,38 @@ checksum = "eb88f1ea2762065d6cc0316372acc22696ab6004943aa029f80546f9faf1b491"
 dependencies = [
  "deno_core",
  "deno_error 0.6.1",
- "deno_features",
- "deno_permissions",
- "deno_tls",
+ "deno_features 0.6.0",
+ "deno_permissions 0.68.0",
+ "deno_tls 0.196.0",
  "hickory-proto",
  "hickory-resolver",
+ "pin-project",
+ "quinn",
+ "rustls-tokio-stream",
+ "serde",
+ "sha2 0.10.9",
+ "socket2 0.5.10",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-vsock",
+ "url",
+ "web-transport-proto",
+]
+
+[[package]]
+name = "deno_net"
+version = "0.202.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ceaf7f2682fd195eb04f6bdbadba9104139f83cbaa462f646b2d17cca6c77296"
+dependencies = [
+ "deno_core",
+ "deno_error 0.6.1",
+ "deno_features 0.7.0",
+ "deno_permissions 0.69.0",
+ "deno_tls 0.197.0",
+ "hickory-proto",
+ "hickory-resolver",
+ "log",
  "pin-project",
  "quinn",
  "rustls-tokio-stream",
@@ -4176,6 +4214,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "deno_permissions"
+version = "0.69.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e47a9b5ff68cab3d692a94c903e0365f3ec86b58a11659c849e2cdd6fd654bfb"
+dependencies = [
+ "capacity_builder",
+ "deno_error 0.6.1",
+ "deno_path_util",
+ "deno_terminal",
+ "deno_unsync",
+ "fqdn",
+ "ipnetwork",
+ "libc",
+ "log",
+ "nix 0.27.1",
+ "once_cell",
+ "parking_lot",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "sys_traits",
+ "temp_deno_which",
+ "thiserror 2.0.20",
+ "url",
+ "winapi",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "deno_subprocess_windows"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4189,14 +4256,15 @@ dependencies = [
 
 [[package]]
 name = "deno_telemetry"
-version = "0.31.0"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "377581966bd34e85ce230f7f4b1dee7e16c6bf7f845b4690648507ce7ba105d9"
+checksum = "b3926f8e8e1f99341ca6d9b66a3ca36ab4339e27b50759e16dbab72f89dd6b3f"
 dependencies = [
  "async-trait",
  "deno_core",
  "deno_error 0.6.1",
- "deno_tls",
+ "deno_net 0.202.0",
+ "deno_tls 0.197.0",
  "http-body-util",
  "hyper 1.11.1",
  "hyper-rustls 0.27.9",
@@ -4212,6 +4280,8 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-vsock",
+ "tower-service",
 ]
 
 [[package]]
@@ -4229,6 +4299,25 @@ name = "deno_tls"
 version = "0.196.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7835eb6a8d114703b0293573fbb8885bc2c81e8c35363b9e89391dd3c541fa6"
+dependencies = [
+ "deno_core",
+ "deno_error 0.6.1",
+ "deno_native_certs",
+ "rustls 0.23.35",
+ "rustls-pemfile 2.2.0",
+ "rustls-tokio-stream",
+ "rustls-webpki 0.102.8",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "deno_tls"
+version = "0.197.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e97f821da1ad133c04d447107ba58ef20c63c6840212a7facf9153b24ed414d0"
 dependencies = [
  "deno_core",
  "deno_error 0.6.1",
@@ -4276,7 +4365,7 @@ dependencies = [
  "bytes",
  "deno_core",
  "deno_error 0.6.1",
- "deno_permissions",
+ "deno_permissions 0.68.0",
  "encoding_rs",
  "flate2",
  "futures",
@@ -16248,10 +16337,10 @@ dependencies = [
  "deno_fetch",
  "deno_fs",
  "deno_io",
- "deno_net",
- "deno_permissions",
+ "deno_net 0.201.0",
+ "deno_permissions 0.68.0",
  "deno_telemetry",
- "deno_tls",
+ "deno_tls 0.196.0",
  "deno_url",
  "deno_web",
  "deno_webidl",
