@@ -14876,7 +14876,7 @@ dependencies = [
  "windmill-worker",
  "windmill-worker-volumes",
  "windows-service",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
