@@ -150,7 +150,7 @@
 		"rehype-raw": "^7.0.0",
 		"rehype-sanitize": "^6.0.0",
 		"rfc4648": "^1.5.3",
-		"runed": "^0.36.0",
+		"runed": "^0.37.1",
 		"svelte-carousel": "^1.0.25",
 		"svelte-exmarkdown": "^5.0.0",
 		"svelte-infinite-loading": "^1.4.0",
