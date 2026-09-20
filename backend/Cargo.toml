@@ -537,7 +537,7 @@ v8 = "=137.1.0"  # Exact version NOTE: Do not forget to update version and hash 
 # compatible with aws-sdk-bedrockruntime's `^0.23.31` requirement. deno_tls
 # 0.198+ tightened that to exact `=0.23.28`, which would have made any
 # meaningful deno bump resolver-impossible against aws-sdk.
-deno_fetch = "0.233.0"
+deno_fetch = "0.234.0"
 deno_tls = "0.196.0"
 deno_console = "0.209.0"
 deno_url = "0.209.0"
