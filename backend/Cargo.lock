@@ -5532,6 +5532,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gethostname"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
+dependencies = [
+ "rustix 1.1.5",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "getopts"
 version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7531,11 +7541,11 @@ dependencies = [
 
 [[package]]
 name = "mail-builder"
-version = "0.3.2"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25f5871d5270ed80f2ee750b95600c8d69b05f8653ad3be913b2ad2e924fefcb"
+checksum = "900998f307338c4013a28ab14d760b784067324b164448c6d98a89e44810473b"
 dependencies = [
- "gethostname",
+ "gethostname 1.1.0",
 ]
 
 [[package]]
@@ -7551,19 +7561,19 @@ dependencies = [
 
 [[package]]
 name = "mail-send"
-version = "0.4.9"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a575d25cf00ed68e5790b473b29242a47e991c6187785d47b45e31fc5816554"
+checksum = "aac383831b06755f2ad93f65dd04e9927790c75b5cb9366034e0af11ae369bd7"
 dependencies = [
  "base64 0.22.1",
- "gethostname",
+ "gethostname 1.1.0",
  "mail-builder",
  "rustls 0.23.35",
  "rustls-pki-types",
  "smtp-proto",
  "tokio",
  "tokio-rustls 0.26.5",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -14806,7 +14816,7 @@ dependencies = [
  "constant_time_eq 0.3.1",
  "dotenv",
  "futures",
- "gethostname",
+ "gethostname 0.4.3",
  "git-version",
  "hex",
  "hmac",
@@ -15627,7 +15637,7 @@ dependencies = [
  "erased-serde",
  "futures",
  "futures-core",
- "gethostname",
+ "gethostname 0.4.3",
  "git-version",
  "globset",
  "hex",
