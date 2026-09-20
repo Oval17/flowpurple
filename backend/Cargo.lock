@@ -755,33 +755,33 @@ dependencies = [
 
 [[package]]
 name = "async-nats"
-version = "0.38.0"
+version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76433c4de73442daedb3a59e991d94e85c14ebfc33db53dfcd347a21cd6ef4f8"
+checksum = "d83a251fa1a4c9d0fe6e816b7acd60549e473e08d14f27a1d992c2675abff05f"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures",
+ "futures-util",
  "memchr",
  "nkeys",
  "nuid",
- "once_cell",
  "pin-project",
  "portable-atomic",
- "rand 0.8.5",
+ "rand 0.10.2",
  "regex",
  "ring 0.17.14",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile 2.2.0",
- "rustls-webpki 0.102.8",
+ "rustls-native-certs 0.8.4",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.15",
  "serde",
  "serde_json",
  "serde_nanos",
  "serde_repr",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "time",
  "tokio",
  "tokio-rustls 0.26.5",
+ "tokio-stream",
  "tokio-util",
  "tokio-websockets",
  "tracing",
@@ -13557,11 +13557,11 @@ dependencies = [
  "httparse",
  "rand 0.8.5",
  "ring 0.17.14",
- "rustls-native-certs 0.8.4",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.5",
  "tokio-util",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
