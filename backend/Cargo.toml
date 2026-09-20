@@ -744,7 +744,7 @@ tree-sitter-java = "=0.23.5"
 tree-sitter-ruby = "=0.23.1"
 tree-sitter-r = "=1.2.0"
 oracle = { version = "0.6.3", features = ["chrono"] }
-rumqttc = { version = "0.24.0", features = ["use-native-tls"]}
+rumqttc = { version = "0.25.1", features = ["use-native-tls"]}
 lapin = "2.5"
 tokio-executor-trait = "2.1"
 tokio-reactor-trait = "1.1"
