@@ -595,7 +595,7 @@ sqlx = { version = "0.8.0", features = [
 ] }
 bigdecimal = {version = "^0"}
 dotenv = "^0"
-ulid = { version = "^1", features = ["uuid"] }
+ulid = { version = "^3", features = ["uuid"] }
 futures = "^0"
 futures-core = "^0"
 lazy_static = "1.4.0"
