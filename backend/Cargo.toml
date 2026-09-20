@@ -465,7 +465,7 @@ hyper-util = { version = "^0.1", features = ["client-legacy", "http1", "tokio"] 
 tokio = { version = "=1.46.1", features = ["full", "tracing", "time"] }
 tokio-stream = { version = "0.1.17" }
 tower = "^0"
-tower-http = { version = "^0.6", features = ["trace", "cors", "catch-panic"] }
+tower-http = { version = "^0.7", features = ["trace", "cors", "catch-panic"] }
 tower-cookies = "^0.11"
 serde = "^1"
 # 1.0.151 introduced RawValue::from_string_unchecked, which the SQL executors use
