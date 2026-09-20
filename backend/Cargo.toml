@@ -558,7 +558,7 @@ deno_error = "=0.6.1"
 rustls-pemfile = "2.2.0"
 
 # only used with special deno_core_mac feature to prevent ffi issue on macos, requires libffi to be installed
-libffi-sys = { version = "2.3.0", features = ["system"]}
+libffi-sys = { version = "4.2.2", features = ["system"]}
 
 # `external-account` is off in the crate's defaults, which compiles out the token source for
 # Workload Identity Federation credentials — the keyless setup for running outside GCP. Without it
